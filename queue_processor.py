@@ -13,6 +13,7 @@ import json
 from config import ServerConfig, PerformanceConfig
 from models import InternalOrderbook, HeartbeatMessage
 from utils.logger import setup_logger, setup_data_logger, setup_system_logger, log_orderbook_update
+from metrics import metrics_collector
 
 logger = setup_logger(__name__)
 data_logger = setup_data_logger()
@@ -50,7 +51,7 @@ class MessageQueueProcessor:
         """Start the queue processor"""
         self.is_running = True
         self.start_time = time.time()
-        logger.info("Message queue processor started")
+        logger.info("Queue processor started")
         
         # Start background tasks
         self.background_tasks = [
@@ -62,7 +63,7 @@ class MessageQueueProcessor:
     async def stop(self):
         """Stop the queue processor"""
         self.is_running = False
-        logger.info("Message queue processor stopping...")
+        logger.info("Queue processor stopping")
         
         # Cancel all background tasks
         for task in self.background_tasks:
@@ -74,13 +75,13 @@ class MessageQueueProcessor:
                     pass
         
         self.background_tasks.clear()
-        logger.info("Message queue processor stopped")
+        logger.info("Queue processor stopped")
     
     async def add_orderbook(self, orderbook: InternalOrderbook):
         """Add an orderbook update to the queue"""
         try:
             if self.queue.full():
-                logger.warning("Queue is full, dropping oldest message")
+                logger.warning("Queue capacity reached, dropping oldest message")
                 try:
                     self.queue.get_nowait()  # Remove oldest message
                 except asyncio.QueueEmpty:
@@ -89,9 +90,12 @@ class MessageQueueProcessor:
             await self.queue.put(orderbook)
             self.total_messages_received += 1
             
+            # Record orderbook event received
+            metrics_collector.record_orderbook_received()
+            
             # Log queue status periodically
             if self.total_messages_received % 100 == 0:
-                logger.info(f"Queue status: {self.queue.qsize()}/{ServerConfig.MAX_QUEUE_SIZE} messages")
+                logger.info(f"Queue utilization: {self.queue.qsize()}/{ServerConfig.MAX_QUEUE_SIZE} messages")
                 
         except Exception as e:
             logger.error(f"Error adding orderbook to queue: {e}")
@@ -128,22 +132,22 @@ class MessageQueueProcessor:
                 self.total_messages_processed += 1
                 
                 # Log processing metrics and queue health
-                if self.total_messages_processed % 20 == 0:
+                if self.total_messages_processed % 100 == 0:
                     await self._log_processing_metrics()
                 
                 # Log queue growth warnings
                 queue_size = self.queue.qsize()
-                if queue_size > 10 and queue_size % 25 == 0:
+                if queue_size > 50 and queue_size % 50 == 0:
                     memory_mb = self._get_memory_usage()
                     estimated_delay = self._get_processing_delay()
-                    logger.warning(f"Queue backlog growing: {queue_size} messages, Memory: {memory_mb:.1f}MB, Processing delay: {estimated_delay}ms")
+                    logger.warning(f"Queue backlog detected: {queue_size} messages, Memory: {memory_mb:.1f}MB, Processing: {estimated_delay}ms")
                     
                 expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
                 
-                if processing_time > expected_delay * 2:
-                    logger.error(f"CRITICAL: Processing severely degraded: {processing_time:.1f}ms (expected: {expected_delay}ms, scenario: {self.current_scenario})")
-                elif processing_time > expected_delay * 1.5:
-                    logger.warning(f"Processing delay elevated: {processing_time:.1f}ms (expected: {expected_delay}ms, scenario: {self.current_scenario})")
+                if processing_time > expected_delay * 3:
+                    logger.error(f"Processing performance degraded: {processing_time:.1f}ms (expected: {expected_delay}ms)")
+                elif processing_time > expected_delay * 2:
+                    logger.warning(f"Processing latency elevated: {processing_time:.1f}ms")
                     
             except asyncio.CancelledError:
                 break
@@ -159,7 +163,7 @@ class MessageQueueProcessor:
             orderbook.calculate_data_age()
             
             # Check for data staleness
-            staleness_threshold = 500  # 500ms staleness threshold
+            staleness_threshold = 1000  # 1000ms staleness threshold
             is_stale = orderbook.data_age_ms and orderbook.data_age_ms > staleness_threshold
             
             processed_data = orderbook.to_dict()
@@ -168,26 +172,30 @@ class MessageQueueProcessor:
             processed_data['queue_position'] = self.queue.qsize()
             processed_data['is_stale'] = is_stale
             
-            if is_stale and orderbook.data_age_ms > 1000:
-                system_logger.error(f"CRITICAL: Data critically stale: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms (threshold: {staleness_threshold}ms)")
+            if is_stale and orderbook.data_age_ms > 2000:
+                system_logger.error(f"Data staleness critical: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms")
             elif is_stale:
-                system_logger.warning(f"Data staleness detected: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms (threshold: {staleness_threshold}ms)")
+                system_logger.warning(f"Data staleness detected: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms")
             
             expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
             if processing_time_ms > expected_delay * 2:
-                system_logger.error(f"CRITICAL: Processing severely degraded: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms (expected: {expected_delay}ms)")
+                system_logger.error(f"Processing performance degraded: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms (expected: {expected_delay}ms)")
             elif processing_time_ms > expected_delay * 1.5:
-                system_logger.warning(f"Processing delay elevated: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms (expected: {expected_delay}ms)")
-            elif orderbook.data_age_ms and orderbook.data_age_ms > 100:
-                system_logger.info(f"Processed orderbook {orderbook.sequence_id} in {processing_time_ms:.2f}ms (data age: {orderbook.data_age_ms:.1f}ms)")
+                system_logger.warning(f"Processing latency elevated: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms")
+            
+            # Record orderbook processed and processing time
+            metrics_collector.record_orderbook_processed(processing_time_ms)
             
             # Log orderbook data to separate file
             log_orderbook_update(data_logger, system_logger, processed_data, processing_time_ms)
             
             # Trigger staleness alerts
-            if is_stale and orderbook.data_age_ms > 1000:  # Critical staleness > 1s
-                system_logger.error(f"Critical data staleness: {orderbook.data_age_ms:.1f}ms lag on orderbook {orderbook.sequence_id}")
+            if is_stale and orderbook.data_age_ms > 2000:  # Critical staleness > 2s
+                system_logger.error(f"Data staleness critical: {orderbook.data_age_ms:.1f}ms lag on orderbook {orderbook.sequence_id}")
+                metrics_collector.record_staleness_incident('critical')
                 await self._trigger_staleness_alert(orderbook)
+            elif is_stale:
+                metrics_collector.record_staleness_incident('warning')
             
             # Call callback if registered
             if self.on_orderbook_processed:
@@ -244,7 +252,7 @@ class MessageQueueProcessor:
                 # Reset incident flag after some time to allow multiple incidents
                 if memory_usage <= self.memory_threshold_mb and self.incident_triggered:
                     self.incident_triggered = False
-                    logger.info("Memory usage returned to normal - incident flag reset")
+                    logger.info("Memory usage normalized")
                 
                 # Wait before next check
                 await asyncio.sleep(5)  # Check every 5 seconds
@@ -272,7 +280,7 @@ class MessageQueueProcessor:
             "processing_rate": self.total_messages_processed / (time.time() - self.start_time) if time.time() > self.start_time else 0
         }
         
-        logger.error(f"INCIDENT TRIGGERED: {incident_type} in {self.current_scenario} mode", extra={
+        logger.error(f"System incident: {incident_type}", extra={
             **incident_data,
             **context_info
         })
@@ -280,7 +288,7 @@ class MessageQueueProcessor:
         if self.on_incident_alert:
             await self.on_incident_alert(incident_data)
         
-        logger.info(f"Incident {incident_type} logged with context: Queue {context_info['queue_utilization']:.1f}% full, Memory {context_info['memory_utilization']:.1f}% used, Processing rate {context_info['processing_rate']:.1f} msg/sec")
+        logger.info(f"System status: Queue {context_info['queue_utilization']:.1f}% full, Memory {context_info['memory_utilization']:.1f}% used, Processing rate {context_info['processing_rate']:.1f} msg/sec")
     
     async def _create_heartbeat(self) -> HeartbeatMessage:
         """Create a heartbeat message with current server status"""
@@ -333,22 +341,30 @@ class MessageQueueProcessor:
         queue_utilization = (queue_size / ServerConfig.MAX_QUEUE_SIZE) * 100
         
         if memory_usage > self.memory_threshold_mb * 0.9:
-            logger.error(f"CRITICAL: Memory usage approaching limit: {memory_usage:.1f}MB (threshold: {self.memory_threshold_mb}MB), Queue: {queue_size}, Processing: {processing_delay}ms")
+            logger.error(f"Memory usage critical: {memory_usage:.1f}MB (threshold: {self.memory_threshold_mb}MB), Queue: {queue_size}, Processing: {processing_delay}ms")
         elif memory_usage > self.memory_threshold_mb * 0.7:
-            logger.warning(f"High memory usage: {memory_usage:.1f}MB (threshold: {self.memory_threshold_mb}MB), Queue backlog: {queue_size} messages ({queue_utilization:.1f}% capacity)")
+            logger.warning(f"Memory usage elevated: {memory_usage:.1f}MB (threshold: {self.memory_threshold_mb}MB), Queue backlog: {queue_size} messages ({queue_utilization:.1f}% capacity)")
         elif queue_size > ServerConfig.MAX_QUEUE_SIZE * 0.5:
-            logger.warning(f"Queue backlog building: {queue_size} messages ({queue_utilization:.1f}% capacity), Processing rate: {processing_rate:.1f} msg/sec")
+            logger.warning(f"Queue backlog detected: {queue_size} messages ({queue_utilization:.1f}% capacity), Processing rate: {processing_rate:.1f} msg/sec")
         elif queue_size > ServerConfig.MAX_QUEUE_SIZE * 0.1:
             logger.info(f"Queue utilization: {queue_size} messages ({queue_utilization:.1f}% capacity), Processing rate: {processing_rate:.1f} msg/sec")
         else:
             if self.total_messages_processed % 100 == 0:
-                logger.info(f"System healthy - Rate: {processing_rate:.1f} msg/sec, Memory: {memory_usage:.1f}MB, Queue: {queue_size}")
+                logger.info(f"System status: Rate: {processing_rate:.1f} msg/sec, Memory: {memory_usage:.1f}MB, Queue: {queue_size}")
+        
+        # Update system metrics
+        metrics_collector.update_system_metrics(
+            memory_mb=memory_usage,
+            queue_depth=queue_size,
+            max_queue_size=ServerConfig.MAX_QUEUE_SIZE,
+            proc_rate=processing_rate
+        )
         
         expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
         if processing_delay > expected_delay * 2:
-            logger.error(f"CRITICAL: Processing delay severely degraded: {processing_delay}ms (expected: {expected_delay}ms for {self.current_scenario})")
+            logger.error(f"Processing delay critical: {processing_delay}ms (expected: {expected_delay}ms)")
         elif processing_delay > expected_delay * 1.5:
-            logger.warning(f"Processing delay elevated: {processing_delay}ms (expected: {expected_delay}ms for {self.current_scenario})")
+            logger.warning(f"Processing delay elevated: {processing_delay}ms (expected: {expected_delay}ms)")
         
         metrics = {
             "uptime_seconds": uptime,
@@ -371,7 +387,10 @@ class MessageQueueProcessor:
         delays = PerformanceConfig.get_processing_delays()
         self.processing_delay_ms = delays.get(scenario_name, ServerConfig.PROCESSING_DELAY_MS)
         
-        logger.info(f"Switched profile from '{old_scenario}' to '{scenario_name}' (estimated delay: {self._get_processing_delay()}ms)")
+        # Update metrics
+        metrics_collector.set_scenario(scenario_name)
+        
+        logger.info(f"Scenario switched from '{old_scenario}' to '{scenario_name}' (processing delay: {self._get_processing_delay()}ms)")
     
     def get_status(self) -> Dict[str, Any]:
         """Get current processor status"""

@@ -9,8 +9,14 @@ from datetime import datetime
 from pythonjsonlogger import jsonlogger
 from config import ServerConfig
 
+try:
+    from logging_loki import LokiHandler
+    LOKI_AVAILABLE = True
+except ImportError:
+    LOKI_AVAILABLE = False
+
 def setup_logger(name: str) -> logging.Logger:
-    """Setup a logger with JSON formatting"""
+    """Setup a logger with JSON formatting and optional Loki integration"""
     
     logger = logging.getLogger(name)
     
@@ -33,6 +39,20 @@ def setup_logger(name: str) -> logging.Logger:
     
     # Add handler to logger
     logger.addHandler(console_handler)
+    
+    # Add Loki handler if configured
+    if ServerConfig.ENABLE_LOKI and LOKI_AVAILABLE:
+        try:
+            loki_handler = LokiHandler(
+                url=ServerConfig.LOKI_URL,
+                auth=(ServerConfig.LOKI_USERNAME, ServerConfig.LOKI_PASSWORD),
+                tags={"application": "marketdata-publisher", "component": name.split('.')[-1]},
+                version="1"
+            )
+            loki_handler.setLevel(logging.INFO)
+            logger.addHandler(loki_handler)
+        except Exception as e:
+            logger.warning(f"Failed to setup Loki handler: {e}")
     
     return logger
 

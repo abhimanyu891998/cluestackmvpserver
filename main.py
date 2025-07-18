@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -20,6 +20,7 @@ from models import ServerStatus, HeartbeatMessage
 from utils.logger import setup_logger
 from data_loader import MarketDataLoader, OrderbookParser, DataPublisher
 from queue_processor import MessageQueueProcessor
+from metrics import metrics_collector
 
 # Setup logging
 logger = setup_logger(__name__)
@@ -171,14 +172,14 @@ async def startup_event():
     """Server startup event"""
     global server_start_time, data_loader, queue_processor, publishing_running, publishing_task
     server_start_time = time.time()
-    logger.info("MarketDataPublisher server starting up...")
-    logger.info(f"Server will run on {ServerConfig.HOST}:{ServerConfig.PORT}")
+    logger.info("MarketDataPublisher server starting")
+    logger.info(f"Server listening on {ServerConfig.HOST}:{ServerConfig.PORT}")
     
     # Load all market scenarios
     if data_loader.load_all_scenarios():
-        logger.info("All market scenarios loaded successfully")
+        logger.info("Market scenarios loaded")
     else:
-        logger.error("Failed to load some market scenarios")
+        logger.error("Failed to load market scenarios")
     
     # Set up queue processor callbacks
     queue_processor.set_callbacks(
@@ -251,6 +252,19 @@ async def test_endpoint():
         "message": "Test endpoint working",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.get("/metrics")
+async def get_metrics():
+    """Prometheus metrics endpoint"""
+    return Response(
+        content=metrics_collector.get_metrics(),
+        media_type="text/plain"
+    )
+
+@app.get("/metrics/summary")
+async def get_metrics_summary():
+    """Human-readable metrics summary"""
+    return metrics_collector.get_metrics_summary()
 
 @app.get("/health")
 async def health_check():

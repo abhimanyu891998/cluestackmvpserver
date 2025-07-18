@@ -4,6 +4,10 @@ Configuration settings for MarketDataPublisher server
 
 import os
 from typing import Dict, Any
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class ServerConfig:
     """Server configuration settings"""
@@ -35,6 +39,18 @@ class ServerConfig:
     # Logging settings
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    # Grafana Cloud settings (set via environment variables)
+    LOKI_URL = os.getenv('LOKI_URL', '')
+    LOKI_USERNAME = os.getenv('LOKI_USERNAME', '')
+    LOKI_PASSWORD = os.getenv('LOKI_PASSWORD', '')
+    ENABLE_LOKI = bool(LOKI_URL and LOKI_USERNAME and LOKI_PASSWORD)
+    
+    # Prometheus Remote Write settings
+    PROMETHEUS_URL = os.getenv('PROMETHEUS_URL', '')
+    PROMETHEUS_USERNAME = os.getenv('PROMETHEUS_USERNAME', '')
+    PROMETHEUS_PASSWORD = os.getenv('PROMETHEUS_PASSWORD', '')
+    ENABLE_PROMETHEUS_REMOTE_WRITE = bool(PROMETHEUS_URL and PROMETHEUS_USERNAME and PROMETHEUS_PASSWORD)
     
     # Data paths
     DATA_DIR = "../data/generated"
