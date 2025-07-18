@@ -30,9 +30,9 @@ def setup_logger(name: str) -> logging.Logger:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG)
     
-    # Create JSON formatter
+    # Create JSON formatter with filename and line number
     formatter = jsonlogger.JsonFormatter(
-        fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
+        fmt='%(asctime)s %(name)s %(levelname)s %(filename)s:%(lineno)d %(funcName)s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     console_handler.setFormatter(formatter)
@@ -43,12 +43,19 @@ def setup_logger(name: str) -> logging.Logger:
     # Add Loki handler if configured
     if ServerConfig.ENABLE_LOKI and LOKI_AVAILABLE:
         try:
+            # Create formatter for Loki with filename info
+            loki_formatter = jsonlogger.JsonFormatter(
+                fmt='%(asctime)s %(name)s %(levelname)s %(filename)s:%(lineno)d %(funcName)s %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            
             loki_handler = LokiHandler(
                 url=ServerConfig.LOKI_URL,
                 auth=(ServerConfig.LOKI_USERNAME, ServerConfig.LOKI_PASSWORD),
                 tags={"application": "marketdata-publisher", "component": name.split('.')[-1]},
                 version="1"
             )
+            loki_handler.setFormatter(loki_formatter)
             loki_handler.setLevel(logging.INFO)
             logger.addHandler(loki_handler)
         except Exception as e:
