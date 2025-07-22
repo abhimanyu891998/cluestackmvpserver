@@ -7,7 +7,7 @@ import time
 import psutil
 import re
 from typing import Dict, Any, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from config import ServerConfig, PerformanceConfig
@@ -158,7 +158,7 @@ class MessageQueueProcessor:
         """Process a single orderbook update"""
         try:
             # Mark when processing completes
-            orderbook.timestamp_processed = datetime.utcnow()
+            orderbook.timestamp_processed = datetime.now(timezone.utc)
             orderbook.processing_delay_ms = processing_time_ms
             orderbook.calculate_data_age()
             
@@ -266,7 +266,7 @@ class MessageQueueProcessor:
         
         incident_data = {
             "type": incident_type,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "details": details,
             "scenario": self.current_scenario,
             "uptime_seconds": time.time() - self.start_time
@@ -295,7 +295,7 @@ class MessageQueueProcessor:
         memory_usage = self._get_memory_usage()
         
         return HeartbeatMessage(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             server_status="healthy" if not self.incident_triggered else "degraded",
             queue_size=self.queue.qsize(),
             memory_usage_mb=memory_usage,
@@ -458,7 +458,7 @@ class MessageQueueProcessor:
                 'pair': orderbook.pair,
                 'spread': orderbook.spread,
                 'mid_price': orderbook.mid_price,
-                'processing_time': datetime.utcnow().isoformat()
+                'processing_time': datetime.now(timezone.utc).isoformat()
             }
             
             # Add to audit trail

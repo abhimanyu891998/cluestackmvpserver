@@ -5,7 +5,7 @@ Logging configuration for MarketDataPublisher server
 import logging
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pythonjsonlogger import jsonlogger
 from config import ServerConfig
 
@@ -14,6 +14,17 @@ try:
     LOKI_AVAILABLE = True
 except ImportError:
     LOKI_AVAILABLE = False
+
+class UTCFormatter(jsonlogger.JsonFormatter):
+    """Custom formatter that uses UTC timestamps"""
+    
+    def formatTime(self, record, datefmt=None):
+        """Override to use UTC time"""
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        if datefmt:
+            return dt.strftime(datefmt)
+        else:
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 def setup_logger(name: str) -> logging.Logger:
     """Setup a logger with JSON formatting and optional Loki integration"""
@@ -30,10 +41,10 @@ def setup_logger(name: str) -> logging.Logger:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG)
     
-    # Create JSON formatter with filename and line number
-    formatter = jsonlogger.JsonFormatter(
+    # Create JSON formatter with filename and line number (UTC)
+    formatter = UTCFormatter(
         fmt='%(asctime)s %(name)s %(levelname)s %(filename)s:%(lineno)d %(funcName)s %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        datefmt='%Y-%m-%d %H:%M:%S UTC'
     )
     console_handler.setFormatter(formatter)
     
@@ -43,10 +54,10 @@ def setup_logger(name: str) -> logging.Logger:
     # Add Loki handler if configured
     if ServerConfig.ENABLE_LOKI and LOKI_AVAILABLE:
         try:
-            # Create formatter for Loki with filename info
-            loki_formatter = jsonlogger.JsonFormatter(
+            # Create formatter for Loki with filename info (UTC)
+            loki_formatter = UTCFormatter(
                 fmt='%(asctime)s %(name)s %(levelname)s %(filename)s:%(lineno)d %(funcName)s %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+                datefmt='%Y-%m-%d %H:%M:%S UTC'
             )
             
             loki_handler = LokiHandler(
@@ -81,10 +92,10 @@ def setup_data_logger() -> logging.Logger:
     file_handler = logging.FileHandler('../logs/orderbook_data.log')
     file_handler.setLevel(logging.INFO)
     
-    # Create JSON formatter for data logs
-    formatter = jsonlogger.JsonFormatter(
+    # Create JSON formatter for data logs (UTC)
+    formatter = UTCFormatter(
         fmt='%(asctime)s %(levelname)s %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S,%f'
+        datefmt='%Y-%m-%d %H:%M:%S UTC'
     )
     file_handler.setFormatter(formatter)
     
@@ -111,10 +122,10 @@ def setup_system_logger() -> logging.Logger:
     file_handler = logging.FileHandler('../logs/system_events.log')
     file_handler.setLevel(logging.INFO)
     
-    # Create JSON formatter for system logs
-    formatter = jsonlogger.JsonFormatter(
+    # Create JSON formatter for system logs (UTC)
+    formatter = UTCFormatter(
         fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S,%f'
+        datefmt='%Y-%m-%d %H:%M:%S UTC'
     )
     file_handler.setFormatter(formatter)
     

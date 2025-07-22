@@ -13,7 +13,7 @@ class ServerConfig:
     """Server configuration settings"""
     
     # Server settings
-    HOST = os.getenv("HOST", "0.0.0.0")
+    HOST = os.getenv("HOST", "127.0.0.1")  # Changed from 0.0.0.0 to 127.0.0.1
     PORT = int(os.getenv("PORT", 8000))
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     
@@ -44,13 +44,13 @@ class ServerConfig:
     LOKI_URL = os.getenv('LOKI_URL', '')
     LOKI_USERNAME = os.getenv('LOKI_USERNAME', '')
     LOKI_PASSWORD = os.getenv('LOKI_PASSWORD', '')
-    ENABLE_LOKI = bool(LOKI_URL and LOKI_USERNAME and LOKI_PASSWORD)
+    ENABLE_LOKI = bool(True)
     
     # Prometheus Remote Write settings
     PROMETHEUS_URL = os.getenv('PROMETHEUS_URL', '')
     PROMETHEUS_USERNAME = os.getenv('PROMETHEUS_USERNAME', '')
     PROMETHEUS_PASSWORD = os.getenv('PROMETHEUS_PASSWORD', '')
-    ENABLE_PROMETHEUS_REMOTE_WRITE = bool(PROMETHEUS_URL and PROMETHEUS_USERNAME and PROMETHEUS_PASSWORD)
+    ENABLE_PROMETHEUS_REMOTE_WRITE = bool(True)
     
     # Data paths
     DATA_DIR = "../data/generated"

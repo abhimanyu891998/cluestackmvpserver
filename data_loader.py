@@ -6,7 +6,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional, AsyncGenerator
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 
 from config import ServerConfig
@@ -147,7 +147,7 @@ class OrderbookParser:
         asks_raw = data.get('asks', [])
         
         # Parse timestamp
-        timestamp_received = datetime.utcnow()
+        timestamp_received = datetime.now(timezone.utc)
         
         # Convert to OrderbookLevel objects (top 15 levels)
         bids = [
@@ -165,7 +165,7 @@ class OrderbookParser:
             pair=pair,
             sequence_id=sequence_id,
             timestamp_received=timestamp_received,
-            timestamp_parsed=datetime.utcnow(),
+            timestamp_parsed=datetime.now(timezone.utc),
             timestamp_processed=None,
             bids=bids,
             asks=asks,

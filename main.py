@@ -7,7 +7,8 @@ import json
 import logging
 import signal
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from utils.datetime_utils import utc_now, utc_timestamp
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -69,24 +70,35 @@ class ConnectionManager:
         """Disconnect a client"""
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        logger.info(f"Client disconnected. Total clients: {len(self.active_connections)}")
+            logger.info(f"Client disconnected. Total clients: {len(self.active_connections)}")
+        else:
+            logger.debug("Attempted to disconnect client that was not in active connections")
     
     async def send_personal_message(self, message: str, websocket: WebSocket):
         """Send message to specific client"""
+        if websocket not in self.active_connections:
+            logger.debug("Attempted to send message to disconnected client")
+            return False
+            
         try:
             await websocket.send_text(message)
+            return True
         except Exception as e:
-            logger.error(f"Error sending message to client: {e}")
+            logger.debug(f"Error sending message to client: {e}")
             self.disconnect(websocket)
+            return False
     
     async def broadcast(self, message: str):
         """Broadcast message to all connected clients"""
+        if not self.active_connections:
+            return  # No clients to broadcast to
+            
         disconnected = []
-        for connection in self.active_connections:
+        for connection in self.active_connections[:]:  # Create a copy to iterate over
             try:
                 await connection.send_text(message)
             except Exception as e:
-                logger.error(f"Error broadcasting to client: {e}")
+                logger.debug(f"Error broadcasting to client: {e}")  # Changed to debug level
                 disconnected.append(connection)
         
         # Remove disconnected clients
@@ -126,7 +138,7 @@ async def handle_orderbook_processed(orderbook_data: dict):
     message = {
         "type": "orderbook_update",
         "data": orderbook_data,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
     await manager.broadcast(json.dumps(message))
 
@@ -151,7 +163,7 @@ async def handle_heartbeat(heartbeat: HeartbeatMessage):
     message = {
         "type": "heartbeat",
         "data": heartbeat_data,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
     await manager.broadcast(json.dumps(message))
 
@@ -161,7 +173,7 @@ async def handle_incident_alert(incident_data: dict):
     message = {
         "type": "incident_alert",
         "data": incident_data,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
     await manager.broadcast(json.dumps(message))
     
@@ -250,7 +262,7 @@ async def test_endpoint():
     logger.info("Test endpoint called")
     return {
         "message": "Test endpoint working",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
 
 @app.get("/metrics")
@@ -283,7 +295,7 @@ async def health_check():
         memory_usage_mb=processor_status.get("memory_usage_mb", 0.0),
         active_clients=len(manager.active_connections),
         current_scenario=processor_status.get("current_scenario", current_scenario),
-        last_heartbeat=datetime.utcnow()
+        last_heartbeat=utc_now()
     )
     
     return status.dict()
@@ -301,7 +313,7 @@ async def server_status():
         memory_usage_mb=0.0,
         active_clients=len(manager.active_connections),
         current_scenario=current_scenario,
-        last_heartbeat=datetime.utcnow()
+        last_heartbeat=utc_now()
     )
     
     return {
@@ -319,41 +331,61 @@ async def server_status():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time data"""
+    # Check origin header for browser connections
+    origin = websocket.headers.get('origin')
+    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"]
+    
+    if origin and origin not in allowed_origins:
+        logger.warning(f"WebSocket connection rejected from origin: {origin}")
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
+    
     await manager.connect(websocket)
     
     try:
+        logger.info(f"WebSocket connection established from origin: {origin}")
+        
         # Send initial connection message
         welcome_message = {
             "type": "connection",
             "data": {
                 "message": "Connected to MarketDataPublisher",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_timestamp(),
                 "scenario": current_scenario
             }
         }
         await manager.send_personal_message(json.dumps(welcome_message), websocket)
+        logger.info("Initial welcome message sent to client")
         
-        # Keep connection alive
+        # Keep connection alive and listen for client messages
         while True:
             try:
-                # Wait for client messages (ping/pong)
-                data = await websocket.receive_text()
-                logger.debug(f"Received from client: {data}")
+                # Use receive() instead of receive_text() to handle different message types
+                message = await websocket.receive()
                 
-                # Echo back for now (will be enhanced with actual data processing)
-                response = {
-                    "type": "echo",
-                    "data": {
-                        "message": f"Received: {data}",
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                }
-                await manager.send_personal_message(json.dumps(response), websocket)
+                if message['type'] == 'websocket.disconnect':
+                    logger.info("Client requested disconnect")
+                    break
+                elif message['type'] == 'websocket.receive':
+                    if 'text' in message:
+                        data = message['text']
+                        logger.debug(f"Received from client: {data}")
+                        
+                        # Echo back for now
+                        response = {
+                            "type": "echo",
+                            "data": {
+                                "message": f"Received: {data}",
+                                "timestamp": utc_timestamp()
+                            }
+                        }
+                        await manager.send_personal_message(json.dumps(response), websocket)
                 
             except WebSocketDisconnect:
+                logger.info("Client disconnected (WebSocketDisconnect)")
                 break
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                logger.error(f"WebSocket error in message handling: {e}")
                 break
                 
     except Exception as e:
@@ -412,7 +444,7 @@ async def switch_profile(profile_name: str):
     return {
         "message": f"Switched to profile: {profile_name}",
         "profile": profile_name,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
 
 # Global data publishing control
@@ -450,7 +482,7 @@ async def get_publisher_status():
     return {
         "publisher": status,
         "profile_info": data_loader.get_current_scenario_info(),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_timestamp()
     }
 
 

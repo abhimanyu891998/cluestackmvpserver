@@ -4,7 +4,7 @@ Data models for MarketDataPublisher server
 
 from pydantic import BaseModel, Field
 from typing import List, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 
 class OrderbookLevel(BaseModel):
@@ -62,7 +62,7 @@ class InternalOrderbook(BaseModel):
 
 class HeartbeatMessage(BaseModel):
     """Heartbeat message for client monitoring"""
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     server_status: str = Field(default="healthy")
     queue_size: int = Field(default=0)
     memory_usage_mb: float = Field(default=0.0)
@@ -84,7 +84,7 @@ class WebSocketMessage(BaseModel):
     """Base WebSocket message structure"""
     type: str = Field(..., description="Message type")
     data: dict = Field(..., description="Message data")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class OrderbookMessage(WebSocketMessage):
     """Orderbook update message"""
