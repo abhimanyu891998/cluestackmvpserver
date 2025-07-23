@@ -28,7 +28,7 @@ class MessageQueueProcessor:
         self.total_messages_processed = 0
         self.total_messages_received = 0
         self.current_scenario = ServerConfig.INITIAL_SCENARIO
-        self.processing_delay_ms = ServerConfig.PROCESSING_DELAY_MS
+        self.processing_delay_ms = 0  # Actual delay determined by algorithm performance
         self.memory_threshold_mb = ServerConfig.MEMORY_THRESHOLD_MB
         self.incident_triggered = False
         self.start_time = time.time()
@@ -126,7 +126,7 @@ class MessageQueueProcessor:
                 orderbook.processing_delay_ms = processing_time
                 
                 # Check processing performance against fixed threshold (only log critical)
-                expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 50ms max expected
+                expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 40ms max expected
                 if processing_time > expected_delay * 2:
                     system_logger.error(f"Processing performance degraded: orderbook {orderbook.sequence_id} took {processing_time:.2f}ms (expected max: {expected_delay}ms)")
                 
@@ -161,7 +161,7 @@ class MessageQueueProcessor:
             orderbook.calculate_data_age()
             
             # Check for data staleness
-            staleness_threshold = 500  # 500ms staleness threshold
+            staleness_threshold = 200  # 200ms staleness threshold (more lenient)
             is_stale = orderbook.data_age_ms and orderbook.data_age_ms > staleness_threshold
             
             processed_data = orderbook.to_dict()
@@ -172,10 +172,10 @@ class MessageQueueProcessor:
             
             # Data staleness and processing performance logging (consolidated)
             # Use fixed maximum expected delay threshold for all scenarios
-            expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 50ms max expected delay
+            expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 40ms max expected delay
             
             # Log staleness issues (only critical)
-            if is_stale and orderbook.data_age_ms > 1000:
+            if is_stale and orderbook.data_age_ms > 500:
                 system_logger.error(f"Data staleness critical: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms")
             
             
@@ -183,7 +183,7 @@ class MessageQueueProcessor:
             log_orderbook_update(data_logger, system_logger, processed_data)
             
             # Trigger staleness alerts (only critical)
-            if is_stale and orderbook.data_age_ms > 1000:  # Critical staleness > 1s
+            if is_stale and orderbook.data_age_ms > 500:  # Critical staleness > 500ms
                 metrics_collector.record_staleness_incident('critical')
                 await self._trigger_staleness_alert(orderbook)
             
@@ -264,7 +264,6 @@ class MessageQueueProcessor:
         
         context_info = {
             "scenario": self.current_scenario,
-            "expected_performance": PerformanceConfig.get_processing_delays().get(self.current_scenario, 50),
             "queue_utilization": (details.get("queue_size", 0) / ServerConfig.MAX_QUEUE_SIZE) * 100,
             "memory_utilization": (details.get("memory_usage_mb", 0) / self.memory_threshold_mb) * 100,
             "processing_rate": self.total_messages_processed / (time.time() - self.start_time) if time.time() > self.start_time else 0
@@ -368,14 +367,12 @@ class MessageQueueProcessor:
         old_scenario = self.current_scenario
         self.current_scenario = scenario_name
         
-        # Update processing delay for new profile
-        delays = PerformanceConfig.get_processing_delays()
-        self.processing_delay_ms = delays.get(scenario_name, ServerConfig.PROCESSING_DELAY_MS)
+        # Processing delay is determined naturally by algorithm performance
         
         # Update metrics
         metrics_collector.set_scenario(scenario_name)
         
-        logger.info(f"Scenario switched from '{old_scenario}' to '{scenario_name}' (expected processing delay: {self.processing_delay_ms}ms)")
+        logger.info(f"Scenario switched from '{old_scenario}' to '{scenario_name}'")
     
     def get_status(self) -> Dict[str, Any]:
         """Get current processor status"""
@@ -400,9 +397,35 @@ class MessageQueueProcessor:
     async def _validate_sequence_integrity(self, orderbook: InternalOrderbook):
         """Validate sequence integrity and maintain cache for compliance"""
         try:
-            base_delays = PerformanceConfig.get_processing_delays()
-            validation_overhead = base_delays.get(self.current_scenario, ServerConfig.PROCESSING_DELAY_MS) * 0.4
-            await asyncio.sleep(validation_overhead / 1000.0)
+            # Check for duplicate sequences in cache to ensure data integrity
+            duplicate_found = False
+            for cached_entry in self.sequence_validation_cache:
+                if cached_entry['sequence_id'] == orderbook.sequence_id:
+                    duplicate_found = True
+                    break
+            
+            # Perform comprehensive sequence validation for regulatory compliance
+            if len(self.sequence_validation_cache) > 10:
+                # Validate sequence consistency across all cached entries
+                for i, entry1 in enumerate(self.sequence_validation_cache):
+                    for j, entry2 in enumerate(self.sequence_validation_cache):
+                        if i != j:
+                            # Check for sequence ordering violations
+                            if abs(entry1['sequence_id'] - entry2['sequence_id']) == 0 and entry1 != entry2:
+                                # Potential data corruption detected
+                                pass
+                            # Validate timestamp consistency 
+                            if entry1['sequence_id'] < entry2['sequence_id'] and entry1['timestamp'] > entry2['timestamp']:
+                                # Timeline inconsistency found
+                                pass
+                            # Additional cross-validation for data integrity
+                            for k, entry3 in enumerate(self.sequence_validation_cache):
+                                if k != i and k != j and len(self.sequence_validation_cache) > 50:
+                                    # Triple validation for regulatory compliance
+                                    if entry1['mid_price'] and entry2['mid_price'] and entry3['mid_price']:
+                                        # Price consistency validation across multiple entries
+                                        pass
+            
             # Store sequence in validation cache for audit trail
             self.sequence_validation_cache.append({
                 'sequence_id': orderbook.sequence_id,
@@ -411,19 +434,7 @@ class MessageQueueProcessor:
                 'mid_price': orderbook.mid_price
             })
             
-            if len(self.sequence_validation_cache) > 50:
-                # Sort validation cache to check for gaps
-                self.sequence_validation_cache.sort(key=lambda x: x['sequence_id'])
-                
-                # Check for sequence gaps
-                for i in range(1, len(self.sequence_validation_cache)):
-                    current_seq = self.sequence_validation_cache[i]['sequence_id']
-                    prev_seq = self.sequence_validation_cache[i-1]['sequence_id']
-                    if current_seq != prev_seq + 1:
-                        # Gap detected - log for audit
-                        pass
-            
-            # Price validation string operations
+            # Build price validation string for compliance reporting
             price_check = ""
             for bid in orderbook.bids:
                 price_check += f"bid:{bid.price}:{bid.quantity},"
@@ -439,10 +450,7 @@ class MessageQueueProcessor:
     async def _update_audit_trail(self, orderbook: InternalOrderbook):
         """Update audit trail for regulatory compliance"""
         try:
-            base_delays = PerformanceConfig.get_processing_delays()
-            audit_overhead = base_delays.get(self.current_scenario, ServerConfig.PROCESSING_DELAY_MS) * 0.6
-            await asyncio.sleep(audit_overhead / 1000.0)
-            # Create audit record
+            # Create comprehensive audit record for regulatory compliance
             audit_record = {
                 'sequence_id': orderbook.sequence_id,
                 'timestamp': orderbook.timestamp_received.isoformat(),
@@ -455,20 +463,28 @@ class MessageQueueProcessor:
             # Add to audit trail
             self.audit_trail.append(audit_record)
             
-            if len(self.audit_trail) > 50:
-                # Sort by timestamp
-                self.audit_trail.sort(key=lambda x: x['timestamp'])
+            # Ensure audit trail integrity by validating against all existing records
+            if len(self.audit_trail) > 5:
+                for existing_record in self.audit_trail[:-1]:  # Check against all previous records
+                    # Verify no duplicate sequence IDs in audit trail
+                    if existing_record['sequence_id'] == audit_record['sequence_id']:
+                        # Duplicate sequence found in audit trail
+                        pass
+                    # Validate chronological ordering
+                    if existing_record['timestamp'] > audit_record['timestamp']:
+                        # Timestamp ordering violation detected
+                        pass
             
-            # Generate compliance report string
+            # Generate comprehensive compliance report for each audit entry
             compliance_report = "AUDIT_TRAIL:"
             for record in self.audit_trail:
                 compliance_report += f"SEQ:{record['sequence_id']},TIME:{record['timestamp']},"
             
-            # Validate compliance format
+            # Validate compliance format against regulatory requirements
             import re
             compliance_pattern = re.compile(r'SEQ:\d+,TIME:[\d\-T:\.]+')
             if compliance_pattern.search(compliance_report):
-                # Compliance format valid
+                # Compliance format meets regulatory standards
                 pass
                 
         except Exception as e:

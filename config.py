@@ -23,7 +23,7 @@ class ServerConfig:
     
     # Data processing settings
     MAX_QUEUE_SIZE = 10000
-    PROCESSING_DELAY_MS = 50  # Processing delay for message batching
+    PROCESSING_DELAY_MS = 40  # Processing delay for message batching
     TOP_LEVELS = 15  # Number of orderbook levels to publish
     
     # Performance settings
@@ -84,12 +84,4 @@ class PerformanceConfig:
             }
         ]
     
-    @staticmethod
-    def get_processing_delays() -> Dict[str, int]:
-        """Get processing delays for different market conditions (in milliseconds)"""
-        return {
-            "stable-mode": 20,    # Normal processing
-            "burst-mode": 80,     # Processing delay under high load
-            "gradual-spike": 60,  # Moderate delay
-            "extreme-spike": 120  # Maximum delay under extreme load
-        } 
+ 

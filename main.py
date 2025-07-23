@@ -176,8 +176,6 @@ async def handle_incident_alert(incident_data: dict):
         "timestamp": utc_timestamp()
     }
     await manager.broadcast(json.dumps(message))
-    
-    logger.warning(f"System alert broadcasted: {incident_data['type']}")
 
 @app.on_event("startup")
 async def startup_event():
