@@ -101,10 +101,8 @@ class MarketDataLoader:
         
         if self.current_update_index >= len(updates):
             if loop_on_end:
-                logger.info(f"Reached end of scenario '{self.current_scenario}', restarting data feed")
                 self.current_update_index = 0
             else:
-                logger.info(f"Reached end of scenario '{self.current_scenario}'")
                 return None
         
         update = updates[self.current_update_index]
@@ -259,7 +257,7 @@ class DataPublisher:
                     break
                 else:
                     # This shouldn't happen if looping is enabled, but just in case
-                    logger.warning(f"Unexpected end of data for scenario: {scenario_name}, stopping")
+                    logger.debug(f"End of data for scenario: {scenario_name}, stopping")
                     break
             
             # Parse the update

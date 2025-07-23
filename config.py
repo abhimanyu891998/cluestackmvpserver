@@ -88,8 +88,8 @@ class PerformanceConfig:
     def get_processing_delays() -> Dict[str, int]:
         """Get processing delays for different market conditions (in milliseconds)"""
         return {
-            "stable-mode": 50,    # Normal processing
-            "burst-mode": 300,    # Processing delay under high load
-            "gradual-spike": 150,  # Moderate delay
-            "extreme-spike": 500  # Maximum delay under extreme load
+            "stable-mode": 20,    # Normal processing
+            "burst-mode": 80,     # Processing delay under high load
+            "gradual-spike": 60,  # Moderate delay
+            "extreme-spike": 120  # Maximum delay under extreme load
         } 

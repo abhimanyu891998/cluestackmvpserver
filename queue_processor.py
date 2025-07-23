@@ -51,7 +51,7 @@ class MessageQueueProcessor:
         """Start the queue processor"""
         self.is_running = True
         self.start_time = time.time()
-        logger.info("Queue processor started")
+        logger.info(f"Queue processor started - max queue size: {ServerConfig.MAX_QUEUE_SIZE}, memory threshold: {self.memory_threshold_mb}MB")
         
         # Start background tasks
         self.background_tasks = [
@@ -72,18 +72,19 @@ class MessageQueueProcessor:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    logger.debug(f"Background task cancelled during shutdown")
         
         self.background_tasks.clear()
-        logger.info("Queue processor stopped")
+        logger.info(f"Queue processor stopped - processed {self.total_messages_processed} total messages")
     
     async def add_orderbook(self, orderbook: InternalOrderbook):
         """Add an orderbook update to the queue"""
         try:
             if self.queue.full():
-                logger.warning("Queue capacity reached, dropping oldest message")
+                logger.error(f"Queue capacity reached ({ServerConfig.MAX_QUEUE_SIZE}), dropping oldest message - potential data loss")
                 try:
-                    self.queue.get_nowait()  # Remove oldest message
+                    dropped_orderbook = self.queue.get_nowait()  # Remove oldest message
+                    logger.warning(f"Dropped orderbook {dropped_orderbook.sequence_id} due to queue overflow")
                 except asyncio.QueueEmpty:
                     pass
             
@@ -94,7 +95,7 @@ class MessageQueueProcessor:
             metrics_collector.record_orderbook_received()
             
             # Log queue status periodically
-            if self.total_messages_received % 100 == 0:
+            if self.total_messages_received % 1000 == 0:
                 logger.info(f"Queue utilization: {self.queue.qsize()}/{ServerConfig.MAX_QUEUE_SIZE} messages")
                 
         except Exception as e:
@@ -114,56 +115,53 @@ class MessageQueueProcessor:
                 await self._validate_sequence_integrity(orderbook)
                 await self._update_audit_trail(orderbook)
                 
-                # Apply processing delay based on current market conditions
-                base_delays = PerformanceConfig.get_processing_delays()
-                scenario_delay = base_delays.get(self.current_scenario, ServerConfig.PROCESSING_DELAY_MS)
-                await asyncio.sleep(scenario_delay / 1000.0)  # Convert ms to seconds
+                # Process the orderbook (continue timing through completion)
+                await self._process_orderbook(orderbook)
                 
+                # Calculate total processing time including orderbook processing
                 processing_time = (time.time() - processing_start) * 1000  # Convert to ms
                 
-                # Process the orderbook
-                await self._process_orderbook(orderbook, processing_time)
-                
-                # Track actual processing time for UI display
+                # Track actual processing time for UI display and performance monitoring
                 self.last_processing_time_ms = processing_time
+                orderbook.processing_delay_ms = processing_time
+                
+                # Check processing performance against fixed threshold (only log critical)
+                expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 50ms max expected
+                if processing_time > expected_delay * 2:
+                    system_logger.error(f"Processing performance degraded: orderbook {orderbook.sequence_id} took {processing_time:.2f}ms (expected max: {expected_delay}ms)")
+                
+                # Record orderbook processed and processing time
+                metrics_collector.record_orderbook_processed(processing_time)
                 
                 # Mark task as done
                 self.queue.task_done()
                 self.total_messages_processed += 1
                 
                 # Log processing metrics and queue health
-                if self.total_messages_processed % 100 == 0:
+                if self.total_messages_processed % 1000 == 0:
                     await self._log_processing_metrics()
                 
-                # Log queue growth warnings
+                # Log queue growth warnings (throttled)
                 queue_size = self.queue.qsize()
-                if queue_size > 50 and queue_size % 50 == 0:
+                if queue_size > 1000 and queue_size % 100 == 0:
                     memory_mb = self._get_memory_usage()
                     estimated_delay = self._get_processing_delay()
                     logger.warning(f"Queue backlog detected: {queue_size} messages, Memory: {memory_mb:.1f}MB, Processing: {estimated_delay}ms")
-                    
-                expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
-                
-                if processing_time > expected_delay * 3:
-                    logger.error(f"Processing performance degraded: {processing_time:.1f}ms (expected: {expected_delay}ms)")
-                elif processing_time > expected_delay * 2:
-                    logger.warning(f"Processing latency elevated: {processing_time:.1f}ms")
                     
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error processing queue message: {e}")
     
-    async def _process_orderbook(self, orderbook: InternalOrderbook, processing_time_ms: float):
+    async def _process_orderbook(self, orderbook: InternalOrderbook):
         """Process a single orderbook update"""
         try:
             # Mark when processing completes
             orderbook.timestamp_processed = datetime.now(timezone.utc)
-            orderbook.processing_delay_ms = processing_time_ms
             orderbook.calculate_data_age()
             
             # Check for data staleness
-            staleness_threshold = 1000  # 1000ms staleness threshold
+            staleness_threshold = 500  # 500ms staleness threshold
             is_stale = orderbook.data_age_ms and orderbook.data_age_ms > staleness_threshold
             
             processed_data = orderbook.to_dict()
@@ -172,30 +170,22 @@ class MessageQueueProcessor:
             processed_data['queue_position'] = self.queue.qsize()
             processed_data['is_stale'] = is_stale
             
-            if is_stale and orderbook.data_age_ms > 2000:
+            # Data staleness and processing performance logging (consolidated)
+            # Use fixed maximum expected delay threshold for all scenarios
+            expected_delay = ServerConfig.PROCESSING_DELAY_MS  # Fixed 50ms max expected delay
+            
+            # Log staleness issues (only critical)
+            if is_stale and orderbook.data_age_ms > 1000:
                 system_logger.error(f"Data staleness critical: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms")
-            elif is_stale:
-                system_logger.warning(f"Data staleness detected: orderbook {orderbook.sequence_id} aged {orderbook.data_age_ms:.1f}ms")
             
-            expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
-            if processing_time_ms > expected_delay * 2:
-                system_logger.error(f"Processing performance degraded: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms (expected: {expected_delay}ms)")
-            elif processing_time_ms > expected_delay * 1.5:
-                system_logger.warning(f"Processing latency elevated: orderbook {orderbook.sequence_id} took {processing_time_ms:.2f}ms")
-            
-            # Record orderbook processed and processing time
-            metrics_collector.record_orderbook_processed(processing_time_ms)
             
             # Log orderbook data to separate file
-            log_orderbook_update(data_logger, system_logger, processed_data, processing_time_ms)
+            log_orderbook_update(data_logger, system_logger, processed_data)
             
-            # Trigger staleness alerts
-            if is_stale and orderbook.data_age_ms > 2000:  # Critical staleness > 2s
-                system_logger.error(f"Data staleness critical: {orderbook.data_age_ms:.1f}ms lag on orderbook {orderbook.sequence_id}")
+            # Trigger staleness alerts (only critical)
+            if is_stale and orderbook.data_age_ms > 1000:  # Critical staleness > 1s
                 metrics_collector.record_staleness_incident('critical')
                 await self._trigger_staleness_alert(orderbook)
-            elif is_stale:
-                metrics_collector.record_staleness_incident('warning')
             
             # Call callback if registered
             if self.on_orderbook_processed:
@@ -227,7 +217,7 @@ class MessageQueueProcessor:
             "type": "stale_data",
             "sequence_id": orderbook.sequence_id,
             "data_age_ms": orderbook.data_age_ms,
-            "processing_delay_ms": orderbook.processing_delay_ms,
+            "processing_delay_ms": orderbook.processing_delay_ms, 
             "queue_size": self.queue.qsize(),
             "memory_usage_mb": self._get_memory_usage()
         }
@@ -252,7 +242,7 @@ class MessageQueueProcessor:
                 # Reset incident flag after some time to allow multiple incidents
                 if memory_usage <= self.memory_threshold_mb and self.incident_triggered:
                     self.incident_triggered = False
-                    logger.info("Memory usage normalized")
+                    logger.info(f"Memory usage normalized to {memory_usage:.1f}MB (threshold: {self.memory_threshold_mb}MB)")
                 
                 # Wait before next check
                 await asyncio.sleep(5)  # Check every 5 seconds
@@ -349,7 +339,7 @@ class MessageQueueProcessor:
         elif queue_size > ServerConfig.MAX_QUEUE_SIZE * 0.1:
             logger.info(f"Queue utilization: {queue_size} messages ({queue_utilization:.1f}% capacity), Processing rate: {processing_rate:.1f} msg/sec")
         else:
-            if self.total_messages_processed % 100 == 0:
+            if self.total_messages_processed % 1000 == 0:
                 logger.info(f"System status: Rate: {processing_rate:.1f} msg/sec, Memory: {memory_usage:.1f}MB, Queue: {queue_size}")
         
         # Update system metrics
@@ -360,11 +350,6 @@ class MessageQueueProcessor:
             proc_rate=processing_rate
         )
         
-        expected_delay = PerformanceConfig.get_processing_delays().get(self.current_scenario, 50)
-        if processing_delay > expected_delay * 2:
-            logger.error(f"Processing delay critical: {processing_delay}ms (expected: {expected_delay}ms)")
-        elif processing_delay > expected_delay * 1.5:
-            logger.warning(f"Processing delay elevated: {processing_delay}ms (expected: {expected_delay}ms)")
         
         metrics = {
             "uptime_seconds": uptime,
@@ -390,7 +375,7 @@ class MessageQueueProcessor:
         # Update metrics
         metrics_collector.set_scenario(scenario_name)
         
-        logger.info(f"Scenario switched from '{old_scenario}' to '{scenario_name}' (processing delay: {self._get_processing_delay()}ms)")
+        logger.info(f"Scenario switched from '{old_scenario}' to '{scenario_name}' (expected processing delay: {self.processing_delay_ms}ms)")
     
     def get_status(self) -> Dict[str, Any]:
         """Get current processor status"""
@@ -415,6 +400,9 @@ class MessageQueueProcessor:
     async def _validate_sequence_integrity(self, orderbook: InternalOrderbook):
         """Validate sequence integrity and maintain cache for compliance"""
         try:
+            base_delays = PerformanceConfig.get_processing_delays()
+            validation_overhead = base_delays.get(self.current_scenario, ServerConfig.PROCESSING_DELAY_MS) * 0.4
+            await asyncio.sleep(validation_overhead / 1000.0)
             # Store sequence in validation cache for audit trail
             self.sequence_validation_cache.append({
                 'sequence_id': orderbook.sequence_id,
@@ -451,6 +439,9 @@ class MessageQueueProcessor:
     async def _update_audit_trail(self, orderbook: InternalOrderbook):
         """Update audit trail for regulatory compliance"""
         try:
+            base_delays = PerformanceConfig.get_processing_delays()
+            audit_overhead = base_delays.get(self.current_scenario, ServerConfig.PROCESSING_DELAY_MS) * 0.6
+            await asyncio.sleep(audit_overhead / 1000.0)
             # Create audit record
             audit_record = {
                 'sequence_id': orderbook.sequence_id,

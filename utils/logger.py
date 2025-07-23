@@ -132,6 +132,27 @@ def setup_system_logger() -> logging.Logger:
     # Add handler to logger
     logger.addHandler(file_handler)
     
+    # Add Loki handler if configured
+    if ServerConfig.ENABLE_LOKI and LOKI_AVAILABLE:
+        try:
+            # Create formatter for Loki with filename info (UTC)
+            loki_formatter = UTCFormatter(
+                fmt='%(asctime)s %(name)s %(levelname)s %(filename)s:%(lineno)d %(funcName)s %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S UTC'
+            )
+            
+            loki_handler = LokiHandler(
+                url=ServerConfig.LOKI_URL,
+                auth=(ServerConfig.LOKI_USERNAME, ServerConfig.LOKI_PASSWORD),
+                tags={"application": "marketdata-publisher", "component": "system_events"},
+                version="1"
+            )
+            loki_handler.setFormatter(loki_formatter)
+            loki_handler.setLevel(logging.INFO)
+            logger.addHandler(loki_handler)
+        except Exception as e:
+            logger.warning(f"Failed to setup Loki handler for system logger: {e}")
+    
     return logger
 
 def log_orderbook_update(data_logger: logging.Logger, system_logger: logging.Logger, orderbook_data: dict, processing_time_ms: float = None):
