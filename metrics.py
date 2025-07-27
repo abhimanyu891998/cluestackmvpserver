@@ -127,7 +127,7 @@ class MetricsCollector:
             try:
                 if self.remote_write_enabled:
                     self._push_metrics_to_remote()
-                time.sleep(15)  # Push metrics every 15 seconds
+                time.sleep(5)  # Push metrics every 15 seconds
             except Exception as e:
                 print(f"Error in remote write: {e}")
                 time.sleep(30)  # Wait longer on error
@@ -141,10 +141,27 @@ class MetricsCollector:
             # Prepare metrics data
             metrics_to_push = []
             
-            # Memory usage
-            memory_mb = memory_usage._value.get() / (1024*1024)
-            if memory_mb > 0:
-                metrics_to_push.append(f"marketdata_memory_usage_bytes {memory_usage._value.get()} {timestamp_ms}")
+            # Get current memory usage directly using psutil
+            import psutil
+            try:
+                process = psutil.Process()
+                memory_info = process.memory_info()
+                current_memory_bytes = memory_info.rss  # Get current memory in bytes
+                memory_mb = current_memory_bytes / (1024 * 1024)
+                
+                # Update the memory gauge with current value
+                memory_usage.set(current_memory_bytes)
+                
+                # Always push memory metrics (remove the > 0 check)
+                metrics_to_push.append(f"marketdata_memory_usage_bytes {current_memory_bytes} {timestamp_ms}")
+                
+            except Exception as e:
+                print(f"Error getting current memory usage: {e}")
+                # Fallback to gauge value if psutil fails
+                memory_bytes = memory_usage._value.get()
+                memory_mb = memory_bytes / (1024*1024)
+                if memory_bytes > 0:
+                    metrics_to_push.append(f"marketdata_memory_usage_bytes {memory_bytes} {timestamp_ms}")
             
             # Orderbook events received (incoming events)
             events_received = orderbook_events_received._value.get()
