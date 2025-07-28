@@ -78,25 +78,35 @@ class MessageQueueProcessor:
         logger.info(f"Queue processor stopped - processed {self.total_messages_processed} total messages")
     
     async def add_orderbook(self, orderbook: InternalOrderbook):
-        """Add an orderbook update to the queue"""
+        """Add an orderbook update to the queue (non-blocking)"""
         try:
-            if self.queue.full():
-                logger.error(f"Queue capacity reached ({ServerConfig.MAX_QUEUE_SIZE}), dropping oldest message - potential data loss")
-                try:
-                    dropped_orderbook = self.queue.get_nowait()  # Remove oldest message
-                    logger.warning(f"Dropped orderbook {dropped_orderbook.sequence_id} due to queue overflow")
-                except asyncio.QueueEmpty:
-                    pass
-            
-            await self.queue.put(orderbook)
+            # Always increment received count first - this should never be blocked
             self.total_messages_received += 1
-            
-            # Record orderbook event received
             metrics_collector.record_orderbook_received()
             
-            # Log queue status periodically
-            if self.total_messages_received % 1000 == 0:
-                logger.info(f"Queue utilization: {self.queue.qsize()}/{ServerConfig.MAX_QUEUE_SIZE} messages")
+            # Debug: Log every 100 messages to see if this function is being called
+            if self.total_messages_received % 100 == 0:
+                logger.info(f"🔢 add_orderbook called {self.total_messages_received} times, queue size: {self.queue.qsize()}")
+            
+            # Handle queue overflow by dropping oldest messages if needed
+            while self.queue.full():
+                try:
+                    dropped_orderbook = self.queue.get_nowait()  # Remove oldest message
+                    logger.warning(f"Queue overflow: dropped orderbook {dropped_orderbook.sequence_id}")
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Use non-blocking put to prevent publisher from being blocked
+            try:
+                self.queue.put_nowait(orderbook)
+                
+                # Log queue status periodically
+                if self.total_messages_received % 1000 == 0:
+                    logger.info(f"Queue utilization: {self.queue.qsize()}/{ServerConfig.MAX_QUEUE_SIZE} messages")
+                    
+            except asyncio.QueueFull:
+                # This should rarely happen due to the cleanup above, but handle gracefully
+                logger.error(f"Failed to add orderbook {orderbook.sequence_id} - queue still full after cleanup")
                 
         except Exception as e:
             logger.error(f"Error adding orderbook to queue: {e}")
@@ -405,7 +415,7 @@ class MessageQueueProcessor:
                     break
             
             # Perform comprehensive sequence validation for regulatory compliance
-            if len(self.sequence_validation_cache) > 10:
+            if len(self.sequence_validation_cache) > 50:
                 # Validate sequence consistency across all cached entries
                 for i, entry1 in enumerate(self.sequence_validation_cache):
                     for j, entry2 in enumerate(self.sequence_validation_cache):
@@ -464,7 +474,7 @@ class MessageQueueProcessor:
             self.audit_trail.append(audit_record)
             
             # Ensure audit trail integrity by validating against all existing records
-            if len(self.audit_trail) > 5:
+            if len(self.audit_trail) > 50:
                 for existing_record in self.audit_trail[:-1]:  # Check against all previous records
                     # Verify no duplicate sequence IDs in audit trail
                     if existing_record['sequence_id'] == audit_record['sequence_id']:

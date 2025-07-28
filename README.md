@@ -43,8 +43,6 @@ python main.py
 
 - **stable-mode**: Normal market conditions
 - **burst-mode**: High-frequency trading periods
-- **gradual-spike**: Progressive market volatility
-- **extreme-spike**: Maximum market stress conditions
 
 ## Monitoring
 

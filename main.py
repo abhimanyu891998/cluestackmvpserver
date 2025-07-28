@@ -156,7 +156,8 @@ async def handle_heartbeat(heartbeat: HeartbeatMessage):
         "active_clients": heartbeat.active_clients,
         "current_scenario": heartbeat.current_scenario,
         "processing_delay_ms": queue_processor._get_processing_delay() if queue_processor else 0,
-        "uptime_seconds": time.time() - server_start_time
+        "uptime_seconds": time.time() - server_start_time,
+        "total_messages_received": queue_processor.total_messages_received if queue_processor else 0
     }
     
     # Broadcast heartbeat to all clients
@@ -453,12 +454,19 @@ async def run_data_publishing():
     """Run the data publishing"""
     global data_publisher, queue_processor, publishing_running
     
+    event_count = 0
     try:
         logger.info(f"Starting data publishing for scenario: {current_scenario}")
         async for orderbook in data_publisher.start_publishing(current_scenario, speed_multiplier=2.0, loop_continuously=True):
             if not publishing_running:
                 logger.info("Data publishing stopped by request")
                 break
+            
+            event_count += 1
+            # Debug: Log every 100 events to see if publishing is working
+            if event_count % 100 == 0:
+                logger.info(f"📡 Publishing loop generated {event_count} events")
+            
             # Add orderbook to queue for processing
             await queue_processor.add_orderbook(orderbook)
             

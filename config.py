@@ -22,7 +22,7 @@ class ServerConfig:
     WS_PING_TIMEOUT = 10   # seconds
     
     # Data processing settings
-    MAX_QUEUE_SIZE = 10000
+    MAX_QUEUE_SIZE = 1000000
     PROCESSING_DELAY_MS = 40  # Processing delay for message batching
     TOP_LEVELS = 15  # Number of orderbook levels to publish
     
@@ -56,9 +56,7 @@ class ServerConfig:
     DATA_DIR = "../data/generated"
     SCENARIOS = {
         "stable-mode": "stable-mode-data.json",
-        "burst-mode": "burst-mode-data.json", 
-        "gradual-spike": "gradual-spike-data.json",
-        "extreme-spike": "extreme-spike-data.json"
+        "burst-mode": "burst-mode-data.json"
     }
     
     # Trading pair settings

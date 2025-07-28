@@ -46,6 +46,12 @@ orderbook_events_received = Counter(
     registry=registry
 )
 
+orderbook_events_received_rate = Gauge(
+    'marketdata_orderbook_events_received_rate_per_second',
+    'Current rate of orderbook events received per second',
+    registry=registry
+)
+
 orderbook_events_processed = Counter(
     'marketdata_orderbook_events_processed_total',
     'Total number of orderbook events processed',
@@ -84,10 +90,18 @@ class MetricsCollector:
         self.remote_write_url = ServerConfig.PROMETHEUS_URL
         self.remote_write_auth = (ServerConfig.PROMETHEUS_USERNAME, ServerConfig.PROMETHEUS_PASSWORD)
         
+        # Rate calculation tracking
+        self.last_events_count = 0
+        self.last_rate_update = time.time()
+        
         # Start background thread for remote write
         if self.remote_write_enabled:
             self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
             self.remote_write_thread.start()
+            
+        # Start background thread for rate calculation
+        self.rate_thread = threading.Thread(target=self._rate_calculation_loop, daemon=True)
+        self.rate_thread.start()
         
     def update_system_metrics(self, memory_mb: float, queue_depth: int, max_queue_size: int, proc_rate: float):
         """Update system-level metrics"""
@@ -112,7 +126,7 @@ class MetricsCollector:
     def set_scenario(self, scenario_name: str):
         """Set current scenario"""
         # Reset all scenario labels to 0
-        for scenario in ['stable-mode', 'burst-mode', 'gradual-spike', 'extreme-spike']:
+        for scenario in ['stable-mode', 'burst-mode']:
             current_scenario.labels(scenario_name=scenario).set(0)
         # Set current scenario to 1
         current_scenario.labels(scenario_name=scenario_name).set(1)
@@ -121,6 +135,35 @@ class MetricsCollector:
         """Get metrics in Prometheus format"""
         return generate_latest(registry)
     
+    def _rate_calculation_loop(self):
+        """Background thread to calculate events received rate"""
+        while True:
+            try:
+                current_time = time.time()
+                current_events = orderbook_events_received._value.get()
+                
+                # Calculate time elapsed since last update (minimum 1 second)
+                time_elapsed = max(current_time - self.last_rate_update, 1.0)
+                
+                # Calculate events since last update
+                events_delta = current_events - self.last_events_count
+                
+                # Calculate rate (events per second)
+                rate = events_delta / time_elapsed
+                
+                # Update the rate gauge
+                orderbook_events_received_rate.set(rate)
+                
+                # Update tracking variables
+                self.last_events_count = current_events
+                self.last_rate_update = current_time
+                
+                time.sleep(2)  # Update rate every 2 seconds for smoother visualization
+                
+            except Exception as e:
+                print(f"Error in rate calculation: {e}")
+                time.sleep(5)
+                
     def _remote_write_loop(self):
         """Background thread to push metrics to Prometheus remote write endpoint"""
         while True:
@@ -168,6 +211,11 @@ class MetricsCollector:
             if events_received > 0:
                 metrics_to_push.append(f"marketdata_orderbook_events_received_total {events_received} {timestamp_ms}")
             
+            # Orderbook events received rate (for hill visualization)
+            events_rate = orderbook_events_received_rate._value.get()
+            if events_rate >= 0:  # Include 0 rates to show valleys
+                metrics_to_push.append(f"marketdata_orderbook_events_received_rate_per_second {events_rate} {timestamp_ms}")
+            
             if metrics_to_push:
                 # Send to Grafana Cloud
                 success = self._send_to_grafana_cloud(metrics_to_push)
@@ -176,6 +224,8 @@ class MetricsCollector:
                     print("📊 Metrics pushed to Grafana Cloud successfully")
                     print(f"   - Memory: {memory_mb:.1f}MB")
                     print(f"   - Events Received: {events_received}")
+                    events_rate = orderbook_events_received_rate._value.get()
+                    print(f"   - Events Rate: {events_rate:.1f}/sec")
                 else:
                     print("⚠️  Failed to push metrics to Grafana Cloud")
             
@@ -191,6 +241,7 @@ class MetricsCollector:
             # Extract metric values
             memory_value = None
             events_value = None
+            events_rate_value = None
             timestamp_ms = int(time.time() * 1000)
             
             for metric in metrics_data:
@@ -200,6 +251,8 @@ class MetricsCollector:
                         memory_value = float(parts[1])
                     elif 'events_received_total' in metric:
                         events_value = float(parts[1])
+                    elif 'events_received_rate_per_second' in metric:
+                        events_rate_value = float(parts[1])
             
             # Create a simplified protobuf message
             # WriteRequest contains repeated TimeSeries timeseries = 1
@@ -228,6 +281,19 @@ class MetricsCollector:
                 timeseries_data = self._create_timeseries_protobuf(
                     "marketdata_orderbook_events_received_total", 
                     events_value, 
+                    timestamp_ms
+                )
+                # WriteRequest field 1 (timeseries)
+                buffer.write(b'\x0a')  # field 1, wire type 2 (length-delimited)
+                buffer.write(self._encode_varint(len(timeseries_data)))
+                buffer.write(timeseries_data)
+            
+            # Create timeseries for events rate (for hill visualization)
+            if events_rate_value is not None:
+                # TimeSeries message
+                timeseries_data = self._create_timeseries_protobuf(
+                    "marketdata_orderbook_events_received_rate_per_second", 
+                    events_rate_value, 
                     timestamp_ms
                 )
                 # WriteRequest field 1 (timeseries)
