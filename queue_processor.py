@@ -171,7 +171,7 @@ class MessageQueueProcessor:
             orderbook.calculate_data_age()
             
             # Check for data staleness
-            staleness_threshold = 200  # 200ms staleness threshold (more lenient)
+            staleness_threshold = 200
             is_stale = orderbook.data_age_ms and orderbook.data_age_ms > staleness_threshold
             
             processed_data = orderbook.to_dict()
@@ -415,7 +415,7 @@ class MessageQueueProcessor:
                     break
             
             # Perform comprehensive sequence validation for regulatory compliance
-            if len(self.sequence_validation_cache) > 50:
+            if len(self.sequence_validation_cache) > 100:
                 # Validate sequence consistency across all cached entries
                 for i, entry1 in enumerate(self.sequence_validation_cache):
                     for j, entry2 in enumerate(self.sequence_validation_cache):
@@ -474,7 +474,7 @@ class MessageQueueProcessor:
             self.audit_trail.append(audit_record)
             
             # Ensure audit trail integrity by validating against all existing records
-            if len(self.audit_trail) > 50:
+            if len(self.audit_trail) > 100:
                 for existing_record in self.audit_trail[:-1]:  # Check against all previous records
                     # Verify no duplicate sequence IDs in audit trail
                     if existing_record['sequence_id'] == audit_record['sequence_id']:
