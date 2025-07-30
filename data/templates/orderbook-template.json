@@ -1,0 +1,8 @@
+{
+    "stream": "btcusdt@depth20@100ms",
+    "data": {
+        "lastUpdateId": 0,
+        "bids": [],
+        "asks": []
+    }
+}

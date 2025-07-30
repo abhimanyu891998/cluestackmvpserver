@@ -1,0 +1,133 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "containerName": {
+      "type": "string",
+      "defaultValue": "bdd-market-data-api",
+      "metadata": {
+        "description": "Name of the container instance"
+      }
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "bddmvpregistry",
+      "metadata": {
+        "description": "Name of the Azure Container Registry"
+      }
+    },
+    "imageName": {
+      "type": "string",
+      "defaultValue": "bdd-market-data-server",
+      "metadata": {
+        "description": "Name of the container image"
+      }
+    },
+    "imageTag": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Tag of the container image"
+      }
+    },
+    "dnsNameLabel": {
+      "type": "string",
+      "defaultValue": "bdd-market-data-api",
+      "metadata": {
+        "description": "DNS name label for the container instance"
+      }
+    },
+    "corsOrigins": {
+      "type": "string",
+      "defaultValue": "https://your-domain.com",
+      "metadata": {
+        "description": "CORS allowed origins"
+      }
+    }
+  },
+  "variables": {
+    "acrLoginServer": "[concat(parameters('acrName'), '.azurecr.io')]",
+    "fullImageName": "[concat(variables('acrLoginServer'), '/', parameters('imageName'), ':', parameters('imageTag'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ContainerInstance/containerGroups",
+      "apiVersion": "2021-03-01",
+      "name": "[parameters('containerName')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "containers": [
+          {
+            "name": "[parameters('containerName')]",
+            "properties": {
+              "image": "[variables('fullImageName')]",
+              "ports": [
+                {
+                  "port": 8000,
+                  "protocol": "TCP"
+                }
+              ],
+              "environmentVariables": [
+                {
+                  "name": "HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "PORT",
+                  "value": "8000"
+                },
+                {
+                  "name": "DEBUG",
+                  "value": "false"
+                },
+                {
+                  "name": "LOG_LEVEL",
+                  "value": "info"
+                },
+                {
+                  "name": "CORS_ORIGINS",
+                  "value": "[parameters('corsOrigins')]"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 2,
+                  "memoryInGB": 4
+                }
+              }
+            }
+          }
+        ],
+        "osType": "Linux",
+        "restartPolicy": "Always",
+        "ipAddress": {
+          "type": "Public",
+          "ports": [
+            {
+              "port": 8000,
+              "protocol": "TCP"
+            }
+          ],
+          "dnsNameLabel": "[parameters('dnsNameLabel')]"
+        },
+        "imageRegistryCredentials": [
+          {
+            "server": "[variables('acrLoginServer')]",
+            "username": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2019-05-01').username]",
+            "password": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2019-05-01').passwords[0].value]"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "fqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerInstance/containerGroups', parameters('containerName'))).ipAddress.fqdn]"
+    },
+    "apiUrl": {
+      "type": "string",
+      "value": "[concat('http://', reference(resourceId('Microsoft.ContainerInstance/containerGroups', parameters('containerName'))).ipAddress.fqdn, ':8000')]"
+    }
+  }
+}

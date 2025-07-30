@@ -94,6 +94,9 @@ class MetricsCollector:
         self.last_events_count = 0
         self.last_rate_update = time.time()
         
+        # Shutdown control
+        self.shutdown_flag = threading.Event()
+        
         # Start background thread for remote write
         if self.remote_write_enabled:
             self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
@@ -137,7 +140,7 @@ class MetricsCollector:
     
     def _rate_calculation_loop(self):
         """Background thread to calculate events received rate"""
-        while True:
+        while not self.shutdown_flag.is_set():
             try:
                 current_time = time.time()
                 current_events = orderbook_events_received._value.get()
@@ -158,22 +161,26 @@ class MetricsCollector:
                 self.last_events_count = current_events
                 self.last_rate_update = current_time
                 
-                time.sleep(2)  # Update rate every 2 seconds for smoother visualization
+                if self.shutdown_flag.wait(2):  # Update rate every 2 seconds, check shutdown
+                    break
                 
             except Exception as e:
                 print(f"Error in rate calculation: {e}")
-                time.sleep(5)
+                if self.shutdown_flag.wait(5):  # Wait 5 seconds on error, check shutdown
+                    break
                 
     def _remote_write_loop(self):
         """Background thread to push metrics to Prometheus remote write endpoint"""
-        while True:
+        while not self.shutdown_flag.is_set():
             try:
                 if self.remote_write_enabled:
                     self._push_metrics_to_remote()
-                time.sleep(5)  # Push metrics every 15 seconds
+                if self.shutdown_flag.wait(5):  # Push metrics every 5 seconds, check shutdown
+                    break
             except Exception as e:
                 print(f"Error in remote write: {e}")
-                time.sleep(30)  # Wait longer on error
+                if self.shutdown_flag.wait(30):  # Wait longer on error, check shutdown
+                    break
     
     def _push_metrics_to_remote(self):
         """Push metrics to Prometheus remote write endpoint"""
@@ -393,6 +400,44 @@ class MetricsCollector:
         buffer.write(self._encode_varint(timestamp_ms))
         
         return buffer.getvalue()
+    
+    def stop(self):
+        """Stop the metrics collector and all background threads"""
+        print("📊 Stopping metrics collector...")
+        self.shutdown_flag.set()
+        
+        # Wait for threads to finish (with timeout)
+        if hasattr(self, 'remote_write_thread') and self.remote_write_thread.is_alive():
+            self.remote_write_thread.join(timeout=2)
+        
+        if hasattr(self, 'rate_thread') and self.rate_thread.is_alive():
+            self.rate_thread.join(timeout=2)
+        
+        print("📊 Metrics collector stopped")
+    
+    def restart(self):
+        """Restart the metrics collector"""
+        print("📊 Restarting metrics collector...")
+        
+        # Stop existing threads
+        self.stop()
+        
+        # Reset shutdown flag
+        self.shutdown_flag.clear()
+        
+        # Reset tracking variables
+        self.last_events_count = 0
+        self.last_rate_update = time.time()
+        
+        # Start new background threads
+        if self.remote_write_enabled:
+            self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
+            self.remote_write_thread.start()
+            
+        self.rate_thread = threading.Thread(target=self._rate_calculation_loop, daemon=True)
+        self.rate_thread.start()
+        
+        print("📊 Metrics collector restarted")
         
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get human-readable metrics summary"""

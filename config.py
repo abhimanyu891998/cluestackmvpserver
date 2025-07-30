@@ -12,10 +12,16 @@ load_dotenv()
 class ServerConfig:
     """Server configuration settings"""
     
-    # Server settings
-    HOST = os.getenv("HOST", "127.0.0.1")  # Changed from 0.0.0.0 to 127.0.0.1
+    # Server settings  
+    HOST = os.getenv("HOST", "0.0.0.0")  # Use 0.0.0.0 for container deployment
     PORT = int(os.getenv("PORT", 8000))
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+    
+    # CORS settings
+    CORS_ORIGINS = os.getenv(
+        "CORS_ORIGINS", 
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+    ).split(",")
     
     # WebSocket settings
     WS_PING_INTERVAL = 20  # seconds
@@ -53,7 +59,7 @@ class ServerConfig:
     ENABLE_PROMETHEUS_REMOTE_WRITE = bool(True)
     
     # Data paths
-    DATA_DIR = "../data/generated"
+    DATA_DIR = "./data/generated"
     SCENARIOS = {
         "stable-mode": "stable-mode-data.json",
         "burst-mode": "burst-mode-data.json"

@@ -1,0 +1,30 @@
+{
+    "defaultScenario": "stable-mode",
+    "scenarioSequence": [
+        {
+            "name": "stable-mode",
+            "duration": 10000,
+            "description": "Normal operation for first 10 seconds"
+        },
+        {
+            "name": "burst-mode",
+            "duration": 15000,
+            "description": "Market spike simulation"
+        }
+    ],
+    "scenarioFiles": {
+        "stable-mode": "./data/scenarios/stable-mode.json",
+        "burst-mode": "./data/scenarios/burst-mode.json"
+    },
+    "switching": {
+        "autoSwitch": true,
+        "manualOverride": true,
+        "transitionDelay": 1000
+    },
+    "dataGeneration": {
+        "basePrice": 120000,
+        "symbol": "BTCUSDT",
+        "precision": 2,
+        "volumePrecision": 4
+    }
+}

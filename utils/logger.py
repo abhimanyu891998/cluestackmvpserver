@@ -86,10 +86,11 @@ def setup_data_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     
     # Create logs directory if it doesn't exist
-    os.makedirs('../logs', exist_ok=True)
+    logs_dir = os.path.join(os.getcwd(), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
     
     # Create file handler for data logs
-    file_handler = logging.FileHandler('../logs/orderbook_data.log')
+    file_handler = logging.FileHandler(os.path.join(logs_dir, 'orderbook_data.log'))
     file_handler.setLevel(logging.INFO)
     
     # Create JSON formatter for data logs (UTC)
@@ -116,10 +117,11 @@ def setup_system_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     
     # Create logs directory if it doesn't exist
-    os.makedirs('../logs', exist_ok=True)
+    logs_dir = os.path.join(os.getcwd(), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
     
     # Create file handler for system logs
-    file_handler = logging.FileHandler('../logs/system_events.log')
+    file_handler = logging.FileHandler(os.path.join(logs_dir, 'system_events.log'))
     file_handler.setLevel(logging.INFO)
     
     # Create JSON formatter for system logs (UTC)

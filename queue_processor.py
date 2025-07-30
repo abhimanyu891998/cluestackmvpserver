@@ -507,4 +507,30 @@ class MessageQueueProcessor:
         """Set callback functions for events"""
         self.on_orderbook_processed = on_orderbook_processed
         self.on_heartbeat = on_heartbeat
-        self.on_incident_alert = on_incident_alert 
+        self.on_incident_alert = on_incident_alert
+    
+    async def reset(self):
+        """Reset queue processor state for restart"""
+        logger.info("Resetting queue processor state")
+        
+        # Clear the queue
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        
+        # Reset counters
+        self.total_messages_processed = 0
+        self.total_messages_received = 0
+        self.processing_delay_ms = 0
+        self.incident_triggered = False
+        self.start_time = time.time()
+        self.last_processing_time_ms = 0
+        
+        # Clear validation caches
+        self.sequence_validation_cache = []
+        self.price_validation_history = {}
+        self.audit_trail = []
+        
+        logger.info("Queue processor reset complete") 

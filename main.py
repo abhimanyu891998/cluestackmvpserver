@@ -36,7 +36,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"],
+    allow_origins=ServerConfig.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,6 +114,10 @@ server_shutdown_event = asyncio.Event()
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
     logger.info(f"Received signal {signum}, initiating shutdown...")
+    
+    # Stop metrics collection
+    metrics_collector.stop()
+    
     server_shutdown_event.set()
     # Force exit after a short delay to prevent hanging
     import threading
@@ -203,10 +207,10 @@ async def startup_event():
     await queue_processor.start()
     logger.info("Queue processor started")
     
-    # Auto-start data publishing
-    publishing_running = True
-    publishing_task = asyncio.create_task(run_data_publishing())
-    logger.info("Data publishing started automatically")
+    # Don't auto-start data publishing - wait for client request
+    publishing_running = False
+    publishing_task = None
+    logger.info("Server ready - waiting for client to start data processing")
     
     # Start shutdown monitor
     asyncio.create_task(_monitor_shutdown())
@@ -332,7 +336,7 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time data"""
     # Check origin header for browser connections
     origin = websocket.headers.get('origin')
-    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"]
+    allowed_origins = ServerConfig.CORS_ORIGINS
     
     if origin and origin not in allowed_origins:
         logger.warning(f"WebSocket connection rejected from origin: {origin}")
@@ -488,6 +492,119 @@ async def get_publisher_status():
     return {
         "publisher": status,
         "profile_info": data_loader.get_current_scenario_info(),
+        "timestamp": utc_timestamp()
+    }
+
+@app.post("/start")
+async def start_data_processing():
+    """Start data processing and streaming"""
+    global publishing_task, publishing_running
+    
+    if publishing_running and publishing_task and not publishing_task.done():
+        return {
+            "message": "Data processing is already running",
+            "status": "running",
+            "timestamp": utc_timestamp()
+        }
+    
+    logger.info("Starting data processing requested by client")
+    
+    try:
+        # Reset global counters and scenario to initial state
+        global total_messages_processed, server_start_time, current_scenario
+        total_messages_processed = 0
+        server_start_time = time.time()
+        current_scenario = ServerConfig.INITIAL_SCENARIO
+        
+        # Reset queue processor
+        if queue_processor:
+            await queue_processor.reset()
+            queue_processor.switch_scenario(current_scenario)
+            logger.info("Queue processor reset")
+        
+        # Reset data publisher
+        if data_publisher:
+            data_publisher.reset()
+            data_publisher.data_loader.switch_scenario(current_scenario)
+            logger.info("Data publisher reset")
+        
+        # Restart metrics collection
+        metrics_collector.restart()
+        
+        # Start publishing task
+        publishing_running = True
+        publishing_task = asyncio.create_task(run_data_publishing())
+        logger.info("Data processing started")
+        
+        return {
+            "message": "Data processing started successfully",
+            "status": "running",
+            "timestamp": utc_timestamp()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting data processing: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to start data processing: {str(e)}"}
+        )
+
+@app.post("/stop")
+async def stop_data_processing():
+    """Stop data processing and streaming"""
+    global publishing_task, publishing_running
+    
+    if not publishing_running:
+        return {
+            "message": "Data processing is already stopped",
+            "status": "stopped",
+            "timestamp": utc_timestamp()
+        }
+    
+    logger.info("Stopping data processing requested by client")
+    
+    try:
+        # Stop current publishing task
+        publishing_running = False
+        if publishing_task and not publishing_task.done():
+            publishing_task.cancel()
+            logger.info("Cancelled publishing task")
+            
+            # Wait for cancellation to complete
+            try:
+                await asyncio.wait_for(publishing_task, timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.info("Publishing task cancellation completed")
+        
+        # Stop metrics collection
+        metrics_collector.stop()
+        
+        logger.info("Data processing stopped")
+        
+        return {
+            "message": "Data processing stopped successfully",
+            "status": "stopped",
+            "timestamp": utc_timestamp()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error stopping data processing: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to stop data processing: {str(e)}"}
+        )
+
+@app.get("/status/processing")
+async def get_processing_status():
+    """Get current data processing status"""
+    global publishing_running, publishing_task
+    
+    is_running = publishing_running and publishing_task and not publishing_task.done()
+    
+    return {
+        "status": "running" if is_running else "stopped",
+        "publishing_running": publishing_running,
+        "task_active": publishing_task is not None and not publishing_task.done() if publishing_task else False,
         "timestamp": utc_timestamp()
     }
 
