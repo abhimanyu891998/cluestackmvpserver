@@ -437,9 +437,9 @@ async def sse_endpoint(request: Request):
     origin = request.headers.get('origin')
     allowed_origins = ServerConfig.CORS_ORIGINS
     
-    if origin and origin not in allowed_origins:
-        logger.warning(f"SSE connection rejected from origin: {origin}")
-        raise HTTPException(status_code=403, detail="Origin not allowed")
+    # if origin and origin not in allowed_origins:
+    #     logger.warning(f"SSE connection rejected from origin: {origin}")
+    #     raise HTTPException(status_code=403, detail="Origin not allowed")
     
     logger.info(f"SSE connection established from origin: {origin}")
     
@@ -465,7 +465,7 @@ async def sse_endpoint(request: Request):
             while True:
                 try:
                     # Wait for message from queue (with timeout to send keepalive)
-                    message = await asyncio.wait_for(client_queue.get(), timeout=30.0)
+                    message = await asyncio.wait_for(client_queue.get(), timeout=15.0)
                     
                     if message == "__SHUTDOWN__":
                         logger.info("SSE client shutdown requested")
@@ -475,7 +475,7 @@ async def sse_endpoint(request: Request):
                     yield f"data: {message}\n\n"
                     
                 except asyncio.TimeoutError:
-                    # Send keepalive message every 30 seconds
+                    # Send keepalive message every 15 seconds
                     keepalive = {
                         "type": "keepalive",
                         "data": {"timestamp": utc_timestamp()}

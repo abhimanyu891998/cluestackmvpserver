@@ -18,10 +18,7 @@ class ServerConfig:
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     
     # CORS settings
-    CORS_ORIGINS = os.getenv(
-        "CORS_ORIGINS", 
-        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,https://cluestackmvpclient.vercel.app/"
-    ).split(",")
+    CORS_ORIGINS = "".split(",")
     
     # WebSocket settings
     WS_PING_INTERVAL = 20  # seconds
