@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from utils.datetime_utils import utc_now, utc_timestamp
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -55,27 +55,39 @@ data_publisher = DataPublisher(data_loader, orderbook_parser)
 queue_processor = MessageQueueProcessor()
 
 class ConnectionManager:
-    """Manage WebSocket connections"""
+    """Manage WebSocket and SSE connections"""
     
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.sse_clients: List[asyncio.Queue] = []
     
     async def connect(self, websocket: WebSocket):
-        """Connect a new client"""
+        """Connect a new WebSocket client"""
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"Client connected. Total clients: {len(self.active_connections)}")
+        logger.info(f"WebSocket client connected. Total clients: {len(self.active_connections)}")
     
     def disconnect(self, websocket: WebSocket):
-        """Disconnect a client"""
+        """Disconnect a WebSocket client"""
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-            logger.info(f"Client disconnected. Total clients: {len(self.active_connections)}")
+            logger.info(f"WebSocket client disconnected. Total clients: {len(self.active_connections)}")
         else:
-            logger.debug("Attempted to disconnect client that was not in active connections")
+            logger.debug("Attempted to disconnect WebSocket client that was not in active connections")
+    
+    def add_sse_client(self, client_queue: asyncio.Queue):
+        """Add a new SSE client"""
+        self.sse_clients.append(client_queue)
+        logger.info(f"SSE client connected. Total SSE clients: {len(self.sse_clients)}")
+    
+    def remove_sse_client(self, client_queue: asyncio.Queue):
+        """Remove an SSE client"""
+        if client_queue in self.sse_clients:
+            self.sse_clients.remove(client_queue)
+            logger.info(f"SSE client disconnected. Total SSE clients: {len(self.sse_clients)}")
     
     async def send_personal_message(self, message: str, websocket: WebSocket):
-        """Send message to specific client"""
+        """Send message to specific WebSocket client"""
         if websocket not in self.active_connections:
             logger.debug("Attempted to send message to disconnected client")
             return False
@@ -89,21 +101,36 @@ class ConnectionManager:
             return False
     
     async def broadcast(self, message: str):
-        """Broadcast message to all connected clients"""
-        if not self.active_connections:
-            return  # No clients to broadcast to
+        """Broadcast message to all connected clients (WebSocket + SSE)"""
+        # Broadcast to WebSocket clients
+        if self.active_connections:
+            disconnected = []
+            for connection in self.active_connections[:]:
+                try:
+                    await connection.send_text(message)
+                except Exception as e:
+                    logger.debug(f"Error broadcasting to WebSocket client: {e}")
+                    disconnected.append(connection)
             
-        disconnected = []
-        for connection in self.active_connections[:]:  # Create a copy to iterate over
-            try:
-                await connection.send_text(message)
-            except Exception as e:
-                logger.debug(f"Error broadcasting to client: {e}")  # Changed to debug level
-                disconnected.append(connection)
+            for connection in disconnected:
+                self.disconnect(connection)
         
-        # Remove disconnected clients
-        for connection in disconnected:
-            self.disconnect(connection)
+        # Broadcast to SSE clients
+        if self.sse_clients:
+            disconnected_sse = []
+            for client_queue in self.sse_clients[:]:
+                try:
+                    await client_queue.put(message)
+                except Exception as e:
+                    logger.debug(f"Error broadcasting to SSE client: {e}")
+                    disconnected_sse.append(client_queue)
+            
+            for client_queue in disconnected_sse:
+                self.remove_sse_client(client_queue)
+    
+    def get_total_clients(self) -> int:
+        """Get total number of connected clients (WebSocket + SSE)"""
+        return len(self.active_connections) + len(self.sse_clients)
 
 # Initialize connection manager
 manager = ConnectionManager()
@@ -149,7 +176,7 @@ async def handle_orderbook_processed(orderbook_data: dict):
 async def handle_heartbeat(heartbeat: HeartbeatMessage):
     """Handle heartbeat from queue processor"""
     # Update active clients count
-    heartbeat.active_clients = len(manager.active_connections)
+    heartbeat.active_clients = manager.get_total_clients()
     
     # Convert heartbeat to JSON-serializable format
     heartbeat_data = {
@@ -248,6 +275,13 @@ async def _monitor_shutdown():
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
     
+    # Close all SSE connections
+    for client_queue in manager.sse_clients[:]:
+        try:
+            await client_queue.put("__SHUTDOWN__")
+        except Exception as e:
+            logger.error(f"Error closing SSE connection: {e}")
+    
     logger.info("Server shutdown complete")
 
 @app.get("/")
@@ -296,7 +330,7 @@ async def health_check():
         total_messages_processed=processor_status.get("total_messages_processed", 0),
         current_queue_size=processor_status.get("queue_size", 0),
         memory_usage_mb=processor_status.get("memory_usage_mb", 0.0),
-        active_clients=len(manager.active_connections),
+        active_clients=manager.get_total_clients(),
         current_scenario=processor_status.get("current_scenario", current_scenario),
         last_heartbeat=utc_now()
     )
@@ -314,7 +348,7 @@ async def server_status():
         total_messages_processed=total_messages_processed,
         current_queue_size=0,
         memory_usage_mb=0.0,
-        active_clients=len(manager.active_connections),
+        active_clients=manager.get_total_clients(),
         current_scenario=current_scenario,
         last_heartbeat=utc_now()
     )
@@ -395,6 +429,76 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket connection error: {e}")
     finally:
         manager.disconnect(websocket)
+
+@app.get("/events")
+async def sse_endpoint(request: Request):
+    """Server-Sent Events endpoint for real-time data"""
+    # Check origin header for browser connections
+    origin = request.headers.get('origin')
+    allowed_origins = ServerConfig.CORS_ORIGINS
+    
+    if origin and origin not in allowed_origins:
+        logger.warning(f"SSE connection rejected from origin: {origin}")
+        raise HTTPException(status_code=403, detail="Origin not allowed")
+    
+    logger.info(f"SSE connection established from origin: {origin}")
+    
+    # Create a queue for this client
+    client_queue = asyncio.Queue()
+    manager.add_sse_client(client_queue)
+    
+    async def generate():
+        try:
+            # Send initial connection message
+            welcome_message = {
+                "type": "connection",
+                "data": {
+                    "message": "Connected to MarketDataPublisher via SSE",
+                    "timestamp": utc_timestamp(),
+                    "scenario": current_scenario
+                }
+            }
+            yield f"data: {json.dumps(welcome_message)}\n\n"
+            logger.info("Initial welcome message sent to SSE client")
+            
+            # Keep connection alive and send messages
+            while True:
+                try:
+                    # Wait for message from queue (with timeout to send keepalive)
+                    message = await asyncio.wait_for(client_queue.get(), timeout=30.0)
+                    
+                    if message == "__SHUTDOWN__":
+                        logger.info("SSE client shutdown requested")
+                        break
+                    
+                    # Send the message
+                    yield f"data: {message}\n\n"
+                    
+                except asyncio.TimeoutError:
+                    # Send keepalive message every 30 seconds
+                    keepalive = {
+                        "type": "keepalive",
+                        "data": {"timestamp": utc_timestamp()}
+                    }
+                    yield f"data: {json.dumps(keepalive)}\n\n"
+                
+        except Exception as e:
+            logger.error(f"SSE connection error: {e}")
+        finally:
+            # Clean up client
+            manager.remove_sse_client(client_queue)
+            logger.info("SSE client disconnected")
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": origin if origin in allowed_origins else "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+        }
+    )
 
 @app.get("/config/profiles")
 async def list_profiles():
