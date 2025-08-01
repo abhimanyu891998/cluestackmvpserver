@@ -1,4 +1,3 @@
-data/generated/
 *.log
 __pycache__/
 .env
