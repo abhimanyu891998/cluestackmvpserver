@@ -24,15 +24,15 @@ class ServerConfig:
     WS_PING_INTERVAL = 20  # seconds
     WS_PING_TIMEOUT = 10   # seconds
     
-    # Data processing settings
-    MAX_QUEUE_SIZE = 1000000
-    PROCESSING_DELAY_MS = 40  # Processing delay for message batching
+    # Data processing settings (optimized for AWS free tier)
+    MAX_QUEUE_SIZE = 50000  # Reduced from 1M to 50K for memory efficiency
+    PROCESSING_DELAY_MS = 100  # Increased to reduce CPU usage
     TOP_LEVELS = 15  # Number of orderbook levels to publish
     
-    # Performance settings
+    # Performance settings (optimized for AWS free tier)
     INITIAL_SCENARIO = "stable-mode"
     PROFILE_SWITCH_TIME = 10  # seconds before switching performance profiles
-    MEMORY_THRESHOLD_MB = 150  # Memory threshold for performance monitoring
+    MEMORY_THRESHOLD_MB = 400  # Increased to fit in 1GB instance
     GRACEFUL_SHUTDOWN_DELAY = 10  # seconds warning before shutdown
     
     # Heartbeat settings

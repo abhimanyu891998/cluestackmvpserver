@@ -47,12 +47,65 @@ server_start_time = time.time()
 active_connections: List[WebSocket] = []
 total_messages_processed = 0
 current_scenario = ServerConfig.INITIAL_SCENARIO
+auto_stop_timer = None  # Timer for 20-minute auto-stop
 
 # Initialize components
 data_loader = MarketDataLoader()
 orderbook_parser = OrderbookParser()
 data_publisher = DataPublisher(data_loader, orderbook_parser)
 queue_processor = MessageQueueProcessor()
+
+async def auto_stop_after_timeout():
+    """Auto-stop server after 20 minutes"""
+    await asyncio.sleep(20 * 60)  # 20 minutes
+    logger.info("⏰ 20-minute timer expired - Auto-stopping all processes")
+    
+    try:
+        await stop_data_processing_internal()
+        logger.info("✅ Auto-stop completed successfully")
+    except Exception as e:
+        logger.error(f"❌ Error during auto-stop: {e}")
+
+async def stop_data_processing_internal():
+    """Internal function to stop all processes (used by both manual stop and auto-stop)"""
+    global publishing_task, publishing_running, auto_stop_timer
+    
+    if not publishing_running:
+        return
+    
+    logger.info("🛑 Stopping ALL processes - including Grafana metrics")
+    
+    # Cancel auto-stop timer if running
+    if auto_stop_timer and not auto_stop_timer.done():
+        auto_stop_timer.cancel()
+        auto_stop_timer = None
+        logger.info("✅ Auto-stop timer cancelled")
+    
+    # 1. Stop current publishing task
+    publishing_running = False
+    if publishing_task and not publishing_task.done():
+        publishing_task.cancel()
+        logger.info("✅ Cancelled publishing task")
+        
+        # Wait for cancellation to complete
+        try:
+            await asyncio.wait_for(publishing_task, timeout=1.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.info("✅ Publishing task cancellation completed")
+    
+    # 2. Stop data publisher
+    data_publisher.stop_publishing()
+    logger.info("✅ Data publisher stopped")
+    
+    # 3. Stop queue processor (stops all background tasks including heartbeat)
+    await queue_processor.stop()
+    logger.info("✅ Queue processor stopped")
+    
+    # 4. Stop metrics collection (including Grafana remote write)
+    metrics_collector.stop()
+    logger.info("✅ Metrics collection stopped (including Grafana)")
+    
+    logger.info("🛑 ALL processes stopped successfully")
 
 class ConnectionManager:
     """Manage WebSocket and SSE connections"""
@@ -496,6 +549,7 @@ async def sse_endpoint(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": origin if origin in allowed_origins else "*",
+            "X-Accel-Buffering": "no",
             "Access-Control-Allow-Headers": "Cache-Control",
         }
     )
@@ -601,8 +655,8 @@ async def get_publisher_status():
 
 @app.post("/start")
 async def start_data_processing():
-    """Start data processing and streaming"""
-    global publishing_task, publishing_running
+    """Start data processing - treats as full server restart to ensure clean state"""
+    global publishing_task, publishing_running, auto_stop_timer, queue_processor, data_publisher, total_messages_processed, server_start_time, current_scenario
     
     if publishing_running and publishing_task and not publishing_task.done():
         return {
@@ -611,52 +665,85 @@ async def start_data_processing():
             "timestamp": utc_timestamp()
         }
     
-    logger.info("Starting data processing requested by client")
+    logger.info("▶️ Starting data processing - full system restart mode")
     
     try:
-        # Reset global counters and scenario to initial state
-        global total_messages_processed, server_start_time, current_scenario
+        # STEP 1: Complete shutdown (like server restart)
+        await stop_data_processing_internal()
+        
+        # STEP 2: Reset all global state
         total_messages_processed = 0
         server_start_time = time.time()
-        current_scenario = ServerConfig.INITIAL_SCENARIO
         
-        # Reset queue processor
-        if queue_processor:
-            await queue_processor.reset()
-            queue_processor.switch_scenario(current_scenario)
-            logger.info("Queue processor reset")
+        # Set to stable scenario
+        stable_scenario = "stable-mode"
+        if stable_scenario in ServerConfig.SCENARIOS:
+            current_scenario = stable_scenario
+        else:
+            current_scenario = ServerConfig.INITIAL_SCENARIO
+            logger.warning(f"Stable scenario not found, using initial: {current_scenario}")
         
-        # Reset data publisher
-        if data_publisher:
-            data_publisher.reset()
-            data_publisher.data_loader.switch_scenario(current_scenario)
-            logger.info("Data publisher reset")
+        logger.info(f"System restart with scenario: {current_scenario}")
         
-        # Restart metrics collection
+        # STEP 3: Reinitialize all components (like startup)
+        # Recreate queue processor
+        queue_processor = MessageQueueProcessor()
+        queue_processor.set_callbacks(
+            on_orderbook_processed=handle_orderbook_processed,
+            on_heartbeat=handle_heartbeat,
+            on_incident_alert=handle_incident_alert
+        )
+        await queue_processor.start()
+        queue_processor.switch_scenario(current_scenario)
+        logger.info("Queue processor recreated and started")
+        
+        # Recreate data publisher  
+        data_publisher = DataPublisher(data_loader, orderbook_parser)
+        data_publisher.reset()
+        if data_publisher.data_loader.switch_scenario(current_scenario):
+            data_publisher.data_loader.reset_scenario()
+        else:
+            raise Exception(f"Failed to load scenario: {current_scenario}")
+        logger.info("Data publisher recreated")
+        
+        # Restart metrics
         metrics_collector.restart()
+        logger.info("Metrics collection restarted")
         
-        # Start publishing task
+        # STEP 4: Start data flow
         publishing_running = True
         publishing_task = asyncio.create_task(run_data_publishing())
-        logger.info("Data processing started")
+        
+        # Start auto-stop timer
+        auto_stop_timer = asyncio.create_task(auto_stop_after_timeout())
+        
+        # Brief verification
+        await asyncio.sleep(0.1)
+        if not publishing_running or publishing_task.done():
+            raise Exception("Data publishing failed to start")
+        
+        logger.info(f"▶️ System restart complete - data flowing with {current_scenario}")
         
         return {
-            "message": "Data processing started successfully",
-            "status": "running",
+            "message": f"System restarted successfully with {current_scenario} mode",
+            "status": "running", 
+            "scenario": current_scenario,
+            "auto_stop_timer": "20 minutes",
             "timestamp": utc_timestamp()
         }
         
     except Exception as e:
-        logger.error(f"Error starting data processing: {e}")
+        logger.error(f"Error during system restart: {e}")
+        publishing_running = False
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to start data processing: {str(e)}"}
+            content={"error": f"System restart failed: {str(e)}"}
         )
 
 @app.post("/stop")
 async def stop_data_processing():
-    """Stop data processing and streaming"""
-    global publishing_task, publishing_running
+    """Stop ALL data processing, streaming, and monitoring processes"""
+    global publishing_running
     
     if not publishing_running:
         return {
@@ -665,37 +752,30 @@ async def stop_data_processing():
             "timestamp": utc_timestamp()
         }
     
-    logger.info("Stopping data processing requested by client")
+    logger.info("🛑 Manual stop requested by client")
     
     try:
-        # Stop current publishing task
-        publishing_running = False
-        if publishing_task and not publishing_task.done():
-            publishing_task.cancel()
-            logger.info("Cancelled publishing task")
-            
-            # Wait for cancellation to complete
-            try:
-                await asyncio.wait_for(publishing_task, timeout=1.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.info("Publishing task cancellation completed")
-        
-        # Stop metrics collection
-        metrics_collector.stop()
-        
-        logger.info("Data processing stopped")
+        await stop_data_processing_internal()
         
         return {
-            "message": "Data processing stopped successfully",
+            "message": "All processes stopped successfully (including Grafana metrics)",
             "status": "stopped",
+            "processes_stopped": [
+                "data_publishing",
+                "queue_processing", 
+                "metrics_collection",
+                "grafana_remote_write",
+                "heartbeat_monitoring",
+                "auto_stop_timer"
+            ],
             "timestamp": utc_timestamp()
         }
         
     except Exception as e:
-        logger.error(f"Error stopping data processing: {e}")
+        logger.error(f"❌ Error stopping all processes: {e}")
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to stop data processing: {str(e)}"}
+            content={"error": f"Failed to stop all processes: {str(e)}"}
         )
 
 @app.get("/status/processing")
@@ -722,3 +802,6 @@ if __name__ == "__main__":
         reload=ServerConfig.DEBUG,
         log_level=ServerConfig.LOG_LEVEL.lower()
     ) 
+
+
+    

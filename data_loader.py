@@ -297,7 +297,8 @@ class DataPublisher:
         logger.info("Resetting data publisher state")
         self.is_running = False
         self.publish_speed = 1.0
-        # Reset the data loader's scenario position
-        if self.data_loader.current_scenario_data:
-            self.data_loader.current_scenario_data['current_update_index'] = 0
+        # Reset the data loader's scenario position to beginning
+        if self.data_loader:
+            self.data_loader.current_update_index = 0
+            logger.info(f"Reset scenario position to beginning for: {self.data_loader.current_scenario}")
         logger.info("Data publisher reset complete") 
