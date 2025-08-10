@@ -18,7 +18,7 @@ class ServerConfig:
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     
     # CORS settings
-    CORS_ORIGINS = "".split(",")
+    CORS_ORIGINS = ["*"]
     
     # WebSocket settings
     WS_PING_INTERVAL = 20  # seconds

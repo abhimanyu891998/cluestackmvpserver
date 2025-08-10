@@ -425,7 +425,7 @@ async def websocket_endpoint(websocket: WebSocket):
     origin = websocket.headers.get('origin')
     allowed_origins = ServerConfig.CORS_ORIGINS
     
-    if origin and origin not in allowed_origins:
+    if origin and "*" not in allowed_origins and origin not in allowed_origins:
         logger.warning(f"WebSocket connection rejected from origin: {origin}")
         await websocket.close(code=1008, reason="Origin not allowed")
         return
@@ -548,7 +548,7 @@ async def sse_endpoint(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": origin if origin in allowed_origins else "*",
+            "Access-Control-Allow-Origin": origin if ("*" in allowed_origins or origin in allowed_origins) else "*",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Headers": "Cache-Control",
         }
