@@ -4,6 +4,8 @@ Prometheus metrics collection for MarketDataPublisher
 
 import time
 import requests
+import aiohttp
+import asyncio
 import threading
 import snappy
 import struct
@@ -97,10 +99,9 @@ class MetricsCollector:
         # Shutdown control
         self.shutdown_flag = threading.Event()
         
-        # Start background thread for remote write
-        if self.remote_write_enabled:
-            self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
-            self.remote_write_thread.start()
+        # Always start remote write thread (it will skip processing if disabled)
+        self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
+        self.remote_write_thread.start()
             
         # Start background thread for rate calculation
         self.rate_thread = threading.Thread(target=self._rate_calculation_loop, daemon=True)
@@ -171,16 +172,29 @@ class MetricsCollector:
                 
     def _remote_write_loop(self):
         """Background thread to push metrics to Prometheus remote write endpoint"""
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(self._async_remote_write_loop())
+        finally:
+            loop.close()
+    
+    async def _async_remote_write_loop(self):
+        """Async loop for remote write operations"""
         while not self.shutdown_flag.is_set():
             try:
-                if self.remote_write_enabled:
-                    self._push_metrics_to_remote()
-                if self.shutdown_flag.wait(5):  # Push metrics every 5 seconds, check shutdown
-                    break
+                # Skip entirely if remote write is disabled
+                if not self.remote_write_enabled:
+                    await asyncio.sleep(10)  # Wait but don't process
+                    continue
+                    
+                await self._push_metrics_to_remote_async()
+                await asyncio.sleep(10)  # Push metrics every 10 seconds
             except Exception as e:
                 print(f"Error in remote write: {e}")
-                if self.shutdown_flag.wait(30):  # Wait longer on error, check shutdown
-                    break
+                await asyncio.sleep(10)  # Wait longer on error
     
     def _push_metrics_to_remote(self):
         """Push metrics to Prometheus remote write endpoint"""
@@ -191,27 +205,40 @@ class MetricsCollector:
             # Prepare metrics data
             metrics_to_push = []
             
-            # Get current memory usage directly using psutil
-            import psutil
-            try:
-                process = psutil.Process()
-                memory_info = process.memory_info()
-                current_memory_bytes = memory_info.rss  # Get current memory in bytes
+            # Get current memory usage with reduced frequency (cache for 10 seconds)
+            if not hasattr(self, '_last_memory_check_sync') or (time.time() - self._last_memory_check_sync) > 10:
+                import psutil
+                try:
+                    process = psutil.Process()
+                    memory_info = process.memory_info()
+                    current_memory_bytes = memory_info.rss  # Get current memory in bytes
+                    memory_mb = current_memory_bytes / (1024 * 1024)
+                    
+                    # Cache the memory value
+                    self._cached_memory_bytes_sync = current_memory_bytes
+                    self._last_memory_check_sync = time.time()
+                    
+                    # Update the memory gauge with current value
+                    memory_usage.set(current_memory_bytes)
+                    
+                except Exception as e:
+                    print(f"Error getting current memory usage: {e}")
+                    # Use cached value or fallback to gauge
+                    if hasattr(self, '_cached_memory_bytes_sync'):
+                        current_memory_bytes = self._cached_memory_bytes_sync
+                        memory_mb = current_memory_bytes / (1024 * 1024)
+                    else:
+                        memory_bytes = memory_usage._value.get()
+                        current_memory_bytes = memory_bytes
+                        memory_mb = memory_bytes / (1024*1024)
+            else:
+                # Use cached memory value
+                current_memory_bytes = getattr(self, '_cached_memory_bytes_sync', memory_usage._value.get())
                 memory_mb = current_memory_bytes / (1024 * 1024)
-                
-                # Update the memory gauge with current value
-                memory_usage.set(current_memory_bytes)
-                
-                # Always push memory metrics (remove the > 0 check)
+            
+            # Always push memory metrics (using cached or fresh value)
+            if current_memory_bytes > 0:
                 metrics_to_push.append(f"marketdata_memory_usage_bytes {current_memory_bytes} {timestamp_ms}")
-                
-            except Exception as e:
-                print(f"Error getting current memory usage: {e}")
-                # Fallback to gauge value if psutil fails
-                memory_bytes = memory_usage._value.get()
-                memory_mb = memory_bytes / (1024*1024)
-                if memory_bytes > 0:
-                    metrics_to_push.append(f"marketdata_memory_usage_bytes {memory_bytes} {timestamp_ms}")
             
             # Orderbook events received (incoming events)
             events_received = orderbook_events_received._value.get()
@@ -238,6 +265,76 @@ class MetricsCollector:
             
         except Exception as e:
             print(f"Error pushing metrics to remote: {e}")
+    
+    async def _push_metrics_to_remote_async(self):
+        """Async version of push metrics to Prometheus remote write endpoint"""
+        try:
+            # Collect current metric values for memory and events only
+            timestamp_ms = int(time.time() * 1000)
+            
+            # Prepare metrics data
+            metrics_to_push = []
+            
+            # Get current memory usage with reduced frequency (cache for 10 seconds)
+            if not hasattr(self, '_last_memory_check') or (time.time() - self._last_memory_check) > 10:
+                import psutil
+                try:
+                    process = psutil.Process()
+                    memory_info = process.memory_info()
+                    current_memory_bytes = memory_info.rss  # Get current memory in bytes
+                    memory_mb = current_memory_bytes / (1024 * 1024)
+                    
+                    # Cache the memory value
+                    self._cached_memory_bytes = current_memory_bytes
+                    self._last_memory_check = time.time()
+                    
+                    # Update the memory gauge with current value
+                    memory_usage.set(current_memory_bytes)
+                    
+                except Exception as e:
+                    print(f"Error getting current memory usage: {e}")
+                    # Use cached value or fallback to gauge
+                    if hasattr(self, '_cached_memory_bytes'):
+                        current_memory_bytes = self._cached_memory_bytes
+                        memory_mb = current_memory_bytes / (1024 * 1024)
+                    else:
+                        memory_bytes = memory_usage._value.get()
+                        current_memory_bytes = memory_bytes
+                        memory_mb = memory_bytes / (1024*1024)
+            else:
+                # Use cached memory value
+                current_memory_bytes = getattr(self, '_cached_memory_bytes', memory_usage._value.get())
+                memory_mb = current_memory_bytes / (1024 * 1024)
+            
+            # Always push memory metrics (using cached or fresh value)
+            if current_memory_bytes > 0:
+                metrics_to_push.append(f"marketdata_memory_usage_bytes {current_memory_bytes} {timestamp_ms}")
+            
+            # Orderbook events received (incoming events)
+            events_received = orderbook_events_received._value.get()
+            if events_received > 0:
+                metrics_to_push.append(f"marketdata_orderbook_events_received_total {events_received} {timestamp_ms}")
+            
+            # Orderbook events received rate (for hill visualization)
+            events_rate = orderbook_events_received_rate._value.get()
+            if events_rate >= 0:  # Include 0 rates to show valleys
+                metrics_to_push.append(f"marketdata_orderbook_events_received_rate_per_second {events_rate} {timestamp_ms}")
+            
+            if metrics_to_push:
+                # Send to Grafana Cloud
+                success = await self._send_to_grafana_cloud_async(metrics_to_push)
+                
+                if success:
+                    print("📊 Metrics pushed to Grafana Cloud successfully (async)")
+                    print(f"   - Memory: {memory_mb:.1f}MB")
+                    print(f"   - Events Received: {events_received}")
+                    events_rate = orderbook_events_received_rate._value.get()
+                    print(f"   - Events Rate: {events_rate:.1f}/sec")
+                else:
+                    print("⚠️  Failed to push metrics to Grafana Cloud (async)")
+            
+        except Exception as e:
+            print(f"Error pushing metrics to remote (async): {e}")
     
     def _send_to_grafana_cloud(self, metrics_data: List[str]) -> bool:
         """Send metrics to Grafana Cloud using proper protobuf"""
@@ -339,6 +436,94 @@ class MetricsCollector:
             print(f"Error sending to Grafana Cloud: {e}")
             return False
     
+    async def _send_to_grafana_cloud_async(self, metrics_data: List[str]) -> bool:
+        """Send metrics to Grafana Cloud using aiohttp"""
+        try:
+            # Create protobuf WriteRequest message manually (same as sync version)
+            import io
+            
+            # Extract metric values
+            memory_value = None
+            events_value = None
+            events_rate_value = None
+            timestamp_ms = int(time.time() * 1000)
+            
+            for metric in metrics_data:
+                parts = metric.split()
+                if len(parts) >= 2:
+                    if 'memory_usage_bytes' in metric:
+                        memory_value = float(parts[1])
+                    elif 'events_received_total' in metric:
+                        events_value = float(parts[1])
+                    elif 'events_received_rate_per_second' in metric:
+                        events_rate_value = float(parts[1])
+            
+            buffer = io.BytesIO()
+            
+            # Create timeseries for memory
+            if memory_value is not None:
+                timeseries_data = self._create_timeseries_protobuf(
+                    "marketdata_memory_usage_bytes", 
+                    memory_value, 
+                    timestamp_ms
+                )
+                buffer.write(b'\x0a')  # field 1, wire type 2 (length-delimited)
+                buffer.write(self._encode_varint(len(timeseries_data)))
+                buffer.write(timeseries_data)
+            
+            # Create timeseries for events
+            if events_value is not None:
+                timeseries_data = self._create_timeseries_protobuf(
+                    "marketdata_orderbook_events_received_total", 
+                    events_value, 
+                    timestamp_ms
+                )
+                buffer.write(b'\x0a')  # field 1, wire type 2 (length-delimited)
+                buffer.write(self._encode_varint(len(timeseries_data)))
+                buffer.write(timeseries_data)
+            
+            # Create timeseries for events rate
+            if events_rate_value is not None:
+                timeseries_data = self._create_timeseries_protobuf(
+                    "marketdata_orderbook_events_received_rate_per_second", 
+                    events_rate_value, 
+                    timestamp_ms
+                )
+                buffer.write(b'\x0a')  # field 1, wire type 2 (length-delimited)
+                buffer.write(self._encode_varint(len(timeseries_data)))
+                buffer.write(timeseries_data)
+            
+            # Get protobuf data and compress
+            protobuf_data = buffer.getvalue()
+            compressed = snappy.compress(protobuf_data)
+            
+            headers = {
+                'Content-Type': 'application/x-protobuf',
+                'Content-Encoding': 'snappy',
+                'X-Prometheus-Remote-Write-Version': '0.1.0'
+            }
+            
+            # Make async request to Grafana Cloud
+            async with aiohttp.ClientSession() as session:
+                auth = aiohttp.BasicAuth(self.remote_write_auth[0], self.remote_write_auth[1])
+                async with session.post(
+                    self.remote_write_url,
+                    data=compressed,
+                    headers=headers,
+                    auth=auth,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status in [200, 204]:
+                        return True
+                    else:
+                        text = await response.text()
+                        print(f"Remote write failed: {response.status} - {text}")
+                        return False
+                
+        except Exception as e:
+            print(f"Error sending to Grafana Cloud (async): {e}")
+            return False
+    
     def _encode_varint(self, value: int) -> bytes:
         """Encode integer as protobuf varint"""
         result = []
@@ -430,9 +615,8 @@ class MetricsCollector:
         self.last_rate_update = time.time()
         
         # Start new background threads
-        if self.remote_write_enabled:
-            self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
-            self.remote_write_thread.start()
+        self.remote_write_thread = threading.Thread(target=self._remote_write_loop, daemon=True)
+        self.remote_write_thread.start()
             
         self.rate_thread = threading.Thread(target=self._rate_calculation_loop, daemon=True)
         self.rate_thread.start()

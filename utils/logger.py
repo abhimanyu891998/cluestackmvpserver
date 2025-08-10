@@ -5,6 +5,9 @@ Logging configuration for MarketDataPublisher server
 import logging
 import sys
 import os
+import asyncio
+import threading
+import queue
 from datetime import datetime, timezone
 from pythonjsonlogger import jsonlogger
 from config import ServerConfig
@@ -14,6 +17,57 @@ try:
     LOKI_AVAILABLE = True
 except ImportError:
     LOKI_AVAILABLE = False
+
+class AsyncLokiHandler(LokiHandler):
+    """Async wrapper for LokiHandler to prevent blocking"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.log_queue = queue.Queue()
+        self.worker_thread = None
+        self._start_worker()
+    
+    def _start_worker(self):
+        """Start background worker thread for async logging"""
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.worker_thread = threading.Thread(target=self._worker, daemon=True)
+            self.worker_thread.start()
+    
+    def _worker(self):
+        """Background worker that processes log records"""
+        while True:
+            try:
+                record = self.log_queue.get(timeout=1.0)
+                if record is None:  # Poison pill to stop worker
+                    break
+                super().emit(record)
+                self.log_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception:
+                # Silently ignore errors to prevent logging loops
+                pass
+    
+    def emit(self, record):
+        """Queue the record for async processing"""
+        try:
+            # Use non-blocking put with maxsize limit
+            if self.log_queue.qsize() < 1000:  # Prevent memory issues
+                self.log_queue.put_nowait(record)
+                self._start_worker()  # Ensure worker is alive
+        except queue.Full:
+            # Drop logs if queue is full to prevent blocking
+            pass
+    
+    def close(self):
+        """Clean shutdown of async handler"""
+        try:
+            self.log_queue.put_nowait(None)  # Poison pill
+            if self.worker_thread and self.worker_thread.is_alive():
+                self.worker_thread.join(timeout=5.0)
+        except:
+            pass
+        super().close()
 
 class UTCFormatter(jsonlogger.JsonFormatter):
     """Custom formatter that uses UTC timestamps"""
@@ -60,7 +114,7 @@ def setup_logger(name: str) -> logging.Logger:
                 datefmt='%Y-%m-%d %H:%M:%S UTC'
             )
             
-            loki_handler = LokiHandler(
+            loki_handler = AsyncLokiHandler(
                 url=ServerConfig.LOKI_URL,
                 auth=(ServerConfig.LOKI_USERNAME, ServerConfig.LOKI_PASSWORD),
                 tags={"application": "marketdata-publisher", "component": name.split('.')[-1]},
@@ -143,7 +197,7 @@ def setup_system_logger() -> logging.Logger:
                 datefmt='%Y-%m-%d %H:%M:%S UTC'
             )
             
-            loki_handler = LokiHandler(
+            loki_handler = AsyncLokiHandler(
                 url=ServerConfig.LOKI_URL,
                 auth=(ServerConfig.LOKI_USERNAME, ServerConfig.LOKI_PASSWORD),
                 tags={"application": "marketdata-publisher", "component": "system_events"},
