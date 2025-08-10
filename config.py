@@ -13,7 +13,7 @@ class ServerConfig:
     """Server configuration settings"""
     
     # Server settings  
-    HOST = os.getenv("HOST", "0.0.0.0")  # Use 0.0.0.0 for container deployment
+    HOST = os.getenv("HOST", "127.0.0.1")  # Use 0.0.0.0 for container deployment
     PORT = int(os.getenv("PORT", 8000))
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     
